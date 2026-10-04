@@ -19,6 +19,10 @@ body { margin: 0; background: #f7f8fc; }
 .table-scroll { min-height:286px; }.table-scroll .MuiTableCell-root { border-color:#eff0f5; }.table-scroll .MuiTableBody-root .MuiTableRow-root:last-child .MuiTableCell-root { border-bottom:0; }
 .route-group-row .MuiTableCell-root { padding-block:11px; background:#f7f8fc; border-top:1px solid #eceef4; color:#596176; }
 .route-group-toggle { width:100%; justify-content:flex-start !important; padding:0 !important; text-transform:none !important; color:inherit !important; }
+.route-address { display:inline-flex; align-items:center; gap:6px; font-size:13.5px !important; font-weight:650 !important; overflow-wrap:anywhere; }
+.route-address .MuiSvgIcon-root { flex-shrink:0; }
+.route-current-address,.route-preview { padding:12px 14px; border:1px solid #e8eaf1; border-radius:9px; background:#f7f8fc; }
+.route-preview { background:#f1f3ff; border-color:#e3e5ff; }
 .status-dot { display:inline-block; width:7px; height:7px; border-radius:50%; flex:0 0 auto; }
 .table-icon { width:30px !important; height:30px !important; color:#625bdb !important; background:#f0efff !important; border-radius:9px !important; }
 .protocol-chip { height:21px !important; border-radius:6px !important; color:#4e56a6 !important; background:#f1f3ff !important; font-size:10px !important; font-weight:700 !important; }

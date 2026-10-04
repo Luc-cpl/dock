@@ -129,6 +129,99 @@ func TestStarterManifestReadableRoundTripAndHTTPSDefaults(t *testing.T) {
 	}
 }
 
+func TestExportUsesServiceManifestAndPreservesEditedRoutes(t *testing.T) {
+	routes := []Route{
+		{ID: "secure", Owner: "ui", Project: "example", Service: "web.app", Hostname: "edited.example.localhost", Protocol: "http", Port: 80, ListenPort: 443, TLS: true, Enabled: true},
+		{ID: "custom", Owner: "ui", Project: "example", Service: "web.app", Hostname: "custom.localhost", Protocol: "http", Port: 8080, ListenPort: 18080, Enabled: true},
+		{ID: "nested", Owner: "ui", Project: "example", Service: "web.app", Hostname: "nested.api.example.localhost", Protocol: "http", Port: 8081, ListenPort: 18081, Enabled: true},
+		{ID: "wildcard", Owner: "ui", Project: "example", Service: "web.app", Hostname: "*.api.example.localhost", Protocol: "http", Port: 8082, ListenPort: 443, TLS: true, Enabled: true},
+		{ID: "db", Owner: "ui", Project: "example", Service: "pgsql", Protocol: "tcp", Port: 5432, ListenPort: 15432, Enabled: false},
+		{ID: "dns", Owner: "ui", Project: "example", Service: "dns", Protocol: "udp", Port: 5353, ListenPort: 15353, Enabled: true},
+		{ID: "other-project", Owner: "ui", Project: "other", Service: "web.app", Hostname: "other.localhost", Protocol: "http", Port: 80, ListenPort: 80, Enabled: true},
+	}
+	m := &Manager{dataDir: t.TempDir(), state: State{Routes: map[string]Route{}}}
+	for _, route := range routes {
+		m.state.Routes[routeKey(route.Owner, route.ID)] = route
+	}
+	manifest, err := m.ExportRoutes("example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := EncodeManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unwanted := range []string{"\nroutes:", "\nproject:", "id:", "tls:", "redirectHttps:", "enabled:", "listenPort:", "container:", "other.localhost"} {
+		if strings.Contains(string(data), unwanted) {
+			t.Fatalf("export contains internal or unrelated field %q:\n%s", unwanted, data)
+		}
+	}
+	if manifest.Services["web.app"][0].Hostname != "edited" || manifest.Services["web.app"][0].Protocol != "https" || manifest.Services["web.app"][0].Port != "80" {
+		t.Fatalf("edited HTTPS route does not use init format: %#v", manifest.Services["web.app"])
+	}
+	if spec := manifest.Services["pgsql"][0]; spec.Protocol != "tcp" || spec.Port != "15432:5432" || !spec.Disabled {
+		t.Fatalf("disabled TCP route changed: %#v", spec)
+	}
+	var decoded Manifest
+	if err := yaml.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	expanded, err := decoded.expandRoutes("example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expanded) != 6 {
+		t.Fatalf("export leaked another project or lost routes: %#v", expanded)
+	}
+	for i := range expanded {
+		expanded[i].Hostname = expandManifestHostname(expanded[i].Hostname, expanded[i].Project)
+		if err := expanded[i].Normalize("ui"); err != nil {
+			t.Fatal(err)
+		}
+		matched := false
+		for _, original := range routes {
+			if original.Project == "example" && expanded[i].Hostname == original.Hostname && expanded[i].Service == original.Service && expanded[i].Port == original.Port && expanded[i].ListenPort == original.ListenPort && expanded[i].Protocol == original.Protocol && expanded[i].TLS == original.TLS && expanded[i].Disabled == !original.Enabled {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Fatalf("export changed effective route settings: %#v", expanded[i])
+		}
+	}
+}
+
+func TestApplyExportAdoptsEnabledDashboardRouteWithoutDuplicates(t *testing.T) {
+	m := &Manager{dataDir: t.TempDir(), state: State{Version: 1, Routes: map[string]Route{}}}
+	if err := m.SaveRoute(Route{ID: "edited", Project: "example", Service: "web", Hostname: "edited.example.localhost", Protocol: "http", Port: 80, TLS: true}, "ui", ""); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := m.ExportRoutes("example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := EncodeManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "dock.yml")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	decoded, _, err := ReadManifest(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := m.ApplyManifest(path, "example", decoded); err != nil {
+			t.Fatal(err)
+		}
+		if got := m.Routes(); len(got) != 1 || got[0].Owner != path || got[0].Hostname != "edited.example.localhost" || !got[0].TLS || got[0].ListenPort != 443 {
+			t.Fatalf("applying export duplicated or changed dashboard route: %#v", got)
+		}
+	}
+}
+
 func TestManifestRejectsInvalidPortsAndRedirectConflicts(t *testing.T) {
 	for _, port := range []string{"", "0", "65536", "abc", "8443:", "127.0.0.1:8443:80", "80/tcp"} {
 		if _, _, err := parseManifestPort(port, "https"); err == nil {
@@ -154,8 +247,11 @@ func TestManifestRejectsInvalidPortsAndRedirectConflicts(t *testing.T) {
 	}
 }
 
-func TestConfiguredDisabledRouteStaysHiddenAndUnmappedAfterReload(t *testing.T) {
+func TestConfiguredDisabledRouteStaysVisibleAndUnmappedAfterReload(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dock.yml")
+	if err := os.WriteFile(path, []byte("version: 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	manifest := Manifest{Version: 1, Services: map[string][]ServiceRoute{
 		"mailpit": {{Protocol: "tcp", Port: "11025:1025"}},
 	}}
@@ -177,8 +273,8 @@ func TestConfiguredDisabledRouteStaysHiddenAndUnmappedAfterReload(t *testing.T) 
 	}
 	// A second manager represents the daemon reloading the CLI's persisted state.
 	reloaded := &Manager{dataDir: dir, state: State{Version: 1, Routes: map[string]Route{}}, containers: containers}
-	if got := reloaded.Routes(); len(got) != 0 {
-		t.Fatalf("configured disabled route was listed or automatically rediscovered: %#v", got)
+	if got := reloaded.Routes(); len(got) != 1 || got[0].Enabled || got[0].Status != "disabled" {
+		t.Fatalf("configured disabled route must remain visible without automatic rediscovery: %#v", got)
 	}
 	if reloaded.Status()["routeCount"] != 0 || manifest.RouteCount() != 0 {
 		t.Fatal("configured disabled route was counted as a visible/applied route")
@@ -191,9 +287,12 @@ func TestConfiguredDisabledRouteStaysHiddenAndUnmappedAfterReload(t *testing.T) 
 		t.Fatalf("configured disabled route still has a TCP mapping or published port: %#v, %#v", config, ports)
 	}
 	for key := range reloaded.state.Routes {
-		if err := reloaded.SetEnabled(key, true); err == nil {
-			t.Fatal("dashboard toggle was allowed to override configuration disabled")
+		if err := reloaded.SetEnabled(key, true); err != nil {
+			t.Fatal(err)
 		}
+	}
+	if got := reloaded.Routes(); len(got) != 1 || !got[0].Enabled {
+		t.Fatalf("dashboard could not enable the route: %#v", got)
 	}
 	manifest.Services["mailpit"][0].Disabled = false
 	if err := reloaded.ApplyManifest(path, "", manifest); err != nil {
@@ -202,7 +301,7 @@ func TestConfiguredDisabledRouteStaysHiddenAndUnmappedAfterReload(t *testing.T) 
 	if got := reloaded.Routes(); len(got) != 1 || !got[0].Enabled {
 		t.Fatalf("reenabled configuration did not restore the route: %#v", got)
 	}
-	// Dashboard-disabled routes are still visible; only config-disabled ones hide.
+	// Disabled routes stay visible regardless of where they were configured.
 	for key := range reloaded.state.Routes {
 		if err := reloaded.SetEnabled(key, false); err != nil {
 			t.Fatal(err)

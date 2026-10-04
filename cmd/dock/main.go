@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"dock/internal/dock"
-	"gopkg.in/yaml.v3"
 )
 
 func main() {
@@ -49,7 +48,7 @@ func run(args []string) error {
 	case "trust":
 		return dock.Trust()
 	case "init":
-		return initManifest(ctx, m, args[1:])
+		return errors.New("use dock routes init to create dock.yml")
 	case "serve":
 		signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -72,15 +71,25 @@ func run(args []string) error {
 		return m.Stop(c)
 	case "routes":
 		if len(args) < 2 {
-			return errors.New("use routes list, routes apply, or routes delete")
+			routesUsage()
+			return nil
 		}
 		switch args[1] {
+		case "init":
+			return initManifest(ctx, m, args[2:])
+		case "help", "-h", "--help":
+			routesUsage()
+			return nil
 		case "list":
 			return listRoutes(m)
 		case "apply":
 			return applyRoutes(ctx, m, args[2:])
 		case "delete":
 			return deleteRoutes(ctx, m, args[2:])
+		case "sync":
+			return syncRoutes(ctx, m, args[2:])
+		case "export":
+			return errors.New("use dock routes sync to save dashboard routes to dock.yml")
 		default:
 			return fmt.Errorf("unknown subcommand: routes %s", args[1])
 		}
@@ -93,63 +102,119 @@ func usage() {
 	fmt.Println(`Dock - local container gateway
 
 Usage:
-  dock init [--file dock.yml] [--project name] [--force]
   dock serve
   dock daemon install|uninstall|enable|disable|start|stop|status
   dock status
   dock trust
   dock stop
-  dock routes list
+  dock routes init [--file dock.yml] [--project name] [--force]
   dock routes apply [--file dock.yml] [--project name]
-  dock routes delete --file dock.yml`)
+  dock routes sync [--file dock.yml] [--project name]
+  dock routes list
+  dock routes delete --file dock.yml | --id dashboard-route-id
+
+Route configuration flow:
+  init   Compose discovery -> dock.yml (use --force to replace an existing file)
+  apply  dock.yml -> Dock
+  sync   Dock dashboard -> dock.yml (replaces the file with current routes)`)
+}
+
+func routesUsage() {
+	fmt.Println(`Usage:
+  dock routes init [--file dock.yml] [--project name] [--force]
+  dock routes apply [--file dock.yml] [--project name]
+  dock routes sync [--file dock.yml] [--project name]
+  dock routes list
+  dock routes delete --file dock.yml | --id dashboard-route-id
+
+  init    Create dock.yml from the running Compose project's discovered routes.
+  apply   Load dock.yml into Dock, replacing routes owned by that file.
+  sync    Save the project's current dashboard routes to dock.yml, replacing the file.
+  list    Show current routes and their status.
+  delete  Remove file-managed routes or a dashboard-created route (--id) from Dock.
+
+init and sync detect the Compose project from the current directory.
+apply detects it from the configuration file's directory.
+Use --project to select a project explicitly. sync is one-way: Dock -> file.`)
+}
+
+func manifestFlags(name, description string) *flag.FlagSet {
+	fs := flag.NewFlagSet("routes "+name, flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), description)
+		fmt.Fprintf(fs.Output(), "Usage: dock routes %s [options]\n", name)
+		fs.PrintDefaults()
+	}
+	return fs
+}
+
+func syncRoutes(ctx context.Context, m *dock.Manager, args []string) error {
+	fs := manifestFlags("sync", "Save the current dashboard routes to dock.yml (Dock -> file), replacing the file.")
+	file := fs.String("file", "dock.yml", "output YAML manifest")
+	project := fs.String("project", "", "Compose project (auto-detected from the current directory)")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if err := m.RefreshInventory(ctx); err != nil {
+		return fmt.Errorf("discover current dashboard routes: %w", err)
+	}
+	selected, err := resolveComposeProject(m, *project)
+	if err != nil {
+		return err
+	}
+	manifest, err := m.ExportRoutes(selected)
+	if err != nil {
+		return err
+	}
+	data, err := dock.EncodeManifest(manifest)
+	if err != nil {
+		return err
+	}
+	path, err := filepath.Abs(*file)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return err
+	}
+	count := 0
+	for _, routes := range manifest.Services {
+		count += len(routes)
+	}
+	fmt.Printf("Synced %d routes for Compose project %q to %s\n", count, selected, path)
+	return nil
 }
 
 func initManifest(ctx context.Context, m *dock.Manager, args []string) error {
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	fs := manifestFlags("init", "Create dock.yml from Compose discovery. An existing file requires --force.")
 	file := fs.String("file", "dock.yml", "output YAML manifest")
 	project := fs.String("project", "", "Compose project (auto-detected from the current directory)")
 	force := fs.Bool("force", false, "replace an existing manifest")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if err := m.RefreshInventory(ctx); err != nil {
 		return fmt.Errorf("discover running Compose project: %w", err)
 	}
-	projects, err := m.FindProject(".")
+	selected, err := resolveComposeProject(m, *project)
 	if err != nil {
 		return err
 	}
-	if *project == "" {
-		switch len(projects) {
-		case 0:
-			cwd, _ := filepath.Abs(".")
-			return fmt.Errorf("no running Compose project declares working_dir=%s", cwd)
-		case 1:
-			*project = projects[0]
-		default:
-			return fmt.Errorf("multiple running Compose projects match this directory (%s); use --project", strings.Join(projects, ", "))
-		}
-	} else {
-		found := false
-		for _, candidate := range projects {
-			if candidate == *project {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("Compose project %q does not declare working_dir for the current directory", *project)
-		}
-	}
+	*project = selected
 	routes := m.DiscoveredRoutes(*project)
 	if len(routes) == 0 {
 		return fmt.Errorf("no recognized HTTP or TCP ports found for running Compose project %q", *project)
 	}
-	data, err := yaml.Marshal(dock.StarterManifest(routes))
+	data, err := dock.EncodeManifest(dock.StarterManifest(routes))
 	if err != nil {
 		return fmt.Errorf("encode manifest: %w", err)
 	}
-	data = append([]byte("# Protocols: http, https, tcp, udp. HTTPS always redirects HTTP.\n# port: container port (HTTP defaults to 80, HTTPS to 443), or \"host:container\".\n# hostname is relative to the automatically detected Compose project.\n# disabled: true hides the route and removes its mapping.\n"), data...)
 	path, err := filepath.Abs(*file)
 	if err != nil {
 		return err
@@ -177,6 +242,25 @@ func initManifest(ctx context.Context, m *dock.Manager, args []string) error {
 	}
 	fmt.Printf("Created %s with %d routes for Compose project %q\n", path, len(routes), *project)
 	return nil
+}
+
+func resolveComposeProject(m *dock.Manager, project string) (string, error) {
+	if project != "" {
+		return project, nil
+	}
+	projects, err := m.FindProject(".")
+	if err != nil {
+		return "", err
+	}
+	switch len(projects) {
+	case 0:
+		cwd, _ := filepath.Abs(".")
+		return "", fmt.Errorf("no running Compose project declares working_dir=%s; use --project", cwd)
+	case 1:
+		return projects[0], nil
+	default:
+		return "", fmt.Errorf("multiple running Compose projects match this directory (%s); use --project", strings.Join(projects, ", "))
+	}
 }
 
 func listRoutes(m *dock.Manager) error {
@@ -209,10 +293,13 @@ func listRoutes(m *dock.Manager) error {
 }
 
 func applyRoutes(ctx context.Context, m *dock.Manager, args []string) error {
-	fs := flag.NewFlagSet("routes apply", flag.ContinueOnError)
+	fs := manifestFlags("apply", "Load dock.yml into Dock (file -> Dock), replacing routes owned by that file.")
 	file := fs.String("file", "dock.yml", "YAML manifest")
 	project := fs.String("project", "", "Compose project")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	manifest, path, err := dock.ReadManifest(*file)

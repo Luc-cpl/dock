@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Port accepts a container port or a Compose-style "host:container" pair.
@@ -125,9 +127,38 @@ func StarterManifest(routes []Route) Manifest {
 		}
 		hostname := ""
 		if protocol == "http" || protocol == "https" {
-			hostname = dnsLabel(route.Service)
+			hostname = relativeManifestHostname(route.Hostname, route.Project, route.Service)
 		}
-		manifest.Services[route.Service] = append(manifest.Services[route.Service], ServiceRoute{Hostname: hostname, Protocol: protocol, Port: port})
+		manifest.Services[route.Service] = append(manifest.Services[route.Service], ServiceRoute{Hostname: hostname, Protocol: protocol, Port: port, Disabled: route.Disabled})
 	}
 	return manifest
+}
+
+func relativeManifestHostname(hostname, project, service string) string {
+	if hostname == "" {
+		return dnsLabel(service)
+	}
+	if project != "" {
+		suffix := "." + dnsLabel(project) + ".localhost"
+		if strings.HasSuffix(hostname, suffix) {
+			relative := strings.TrimSuffix(hostname, suffix)
+			if !strings.Contains(relative, ".") || strings.HasPrefix(relative, "*.") {
+				return relative
+			}
+		}
+	}
+	return hostname
+}
+
+// EncodeManifest gives initialization and export the same editable YAML format.
+func EncodeManifest(manifest Manifest) ([]byte, error) {
+	data, err := yaml.Marshal(manifest)
+	if err != nil {
+		return nil, err
+	}
+	header := "# Protocols: http, https, tcp, udp. HTTPS always redirects HTTP.\n" +
+		"# port: container port (HTTP defaults to 80, HTTPS to 443), or \"host:container\".\n" +
+		"# hostname is relative to the Compose project; .localhost names are absolute.\n" +
+		"# disabled: true disables the route while keeping it visible in the dashboard.\n"
+	return append([]byte(header), data...), nil
 }

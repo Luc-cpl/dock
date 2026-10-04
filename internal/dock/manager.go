@@ -54,16 +54,8 @@ func NewManager() (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Manager{dataDir: dir, proxyToken: token, state: State{Version: 1, Routes: map[string]Route{}}, containers: []Container{}}
-	path := filepath.Join(dir, "state.json")
-	if b, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(b, &m.state); err != nil {
-			return nil, fmt.Errorf("read %s: %w", path, err)
-		}
-		if m.state.Routes == nil {
-			m.state.Routes = map[string]Route{}
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	m := &Manager{dataDir: dir, proxyToken: token, state: State{Version: 1, Routes: map[string]Route{}, Overrides: map[string]Route{}}, containers: []Container{}}
+	if err := m.reloadStateLocked(); err != nil {
 		return nil, err
 	}
 	e, err := NewEngine()
@@ -99,19 +91,34 @@ func (m *Manager) Routes() []Route {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	_ = m.reloadStateLocked()
-	out := make([]Route, 0, len(m.state.Routes))
-	for _, r := range m.state.Routes {
-		if !r.Disabled {
-			out = append(out, r)
-		}
-	}
-	out = append(out, m.autoRoutesLocked()...)
+	out := m.effectiveRoutesLocked()
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Hostname == out[j].Hostname {
 			return out[i].ID < out[j].ID
 		}
 		return out[i].Hostname < out[j].Hostname
 	})
+	return out
+}
+
+func (m *Manager) effectiveRoutesLocked() []Route {
+	byKey := map[string]Route{}
+	for _, r := range m.state.Routes {
+		byKey[routeKey(r.Owner, r.ID)] = r
+	}
+	for _, r := range m.autoRoutesLocked() {
+		byKey[routeKey(r.Owner, r.ID)] = r
+	}
+	for key, r := range m.state.Overrides {
+		byKey[key] = r
+	}
+	out := make([]Route, 0, len(byKey))
+	for _, r := range byKey {
+		if !r.Enabled || r.Disabled {
+			r.Status, r.Message = "disabled", "Disabled"
+		}
+		out = append(out, r)
+	}
 	return out
 }
 
@@ -131,7 +138,27 @@ func (m *Manager) reloadStateLocked() error {
 	if state.Routes == nil {
 		state.Routes = map[string]Route{}
 	}
+	if state.Overrides == nil {
+		state.Overrides = map[string]Route{}
+	}
+	// Applied manifests are snapshots, but a deleted source must not leave
+	// stale listeners or suppress automatic discovery indefinitely.
+	changed := false
+	for _, routes := range []map[string]Route{state.Routes, state.Overrides} {
+		for key, route := range routes {
+			if !filepath.IsAbs(route.Owner) {
+				continue
+			}
+			if _, err := os.Stat(route.Owner); errors.Is(err, os.ErrNotExist) {
+				delete(routes, key)
+				changed = true
+			}
+		}
+	}
 	m.state = state
+	if changed {
+		return atomicJSON(path, m.state)
+	}
 	return nil
 }
 
@@ -167,8 +194,8 @@ func (m *Manager) discoverRoutesLocked(suppressManual bool) []Route {
 	manualTargets := map[string]bool{}
 	if suppressManual {
 		for _, r := range m.state.Routes {
+			manualTargets[discoveryTargetKey(r.Project, r.Service, r.Container, r.Port)] = true
 			if r.Disabled {
-				manualTargets[discoveryTargetKey(r.Project, r.Service, r.Container, r.Protocol, r.Port)] = true
 				continue
 			}
 			if r.Enabled && r.Protocol == "http" {
@@ -179,7 +206,13 @@ func (m *Manager) discoverRoutesLocked(suppressManual bool) []Route {
 			}
 			if r.Enabled {
 				manualListeners[r.ListenPort] = true
-				manualTargets[discoveryTargetKey(r.Project, r.Service, r.Container, r.Protocol, r.Port)] = true
+			}
+		}
+		for _, r := range m.state.Overrides {
+			manualTargets[discoveryTargetKey(r.Project, r.Service, r.Container, r.Port)] = true
+			manual[r.Hostname+"/"+strconv.Itoa(r.ListenPort)] = true
+			if r.TLS {
+				manual[r.Hostname+"/80"] = true
 			}
 		}
 	}
@@ -217,7 +250,7 @@ func (m *Manager) discoverRoutesLocked(suppressManual bool) []Route {
 			if c.Project != "" && c.Service != "" {
 				container = ""
 			}
-			if manualTargets[discoveryTargetKey(c.Project, c.Service, container, protocol, p.PrivatePort)] {
+			if manualTargets[discoveryTargetKey(c.Project, c.Service, container, p.PrivatePort)] {
 				continue
 			}
 			if protocol == "tcp" {
@@ -248,8 +281,9 @@ func (m *Manager) discoverRoutesLocked(suppressManual bool) []Route {
 	return out
 }
 
-func discoveryTargetKey(project, service, container, protocol string, port int) string {
-	return fmt.Sprintf("%s/%s/%s/%s/%d", project, service, container, protocol, port)
+func discoveryTargetKey(project, service, container string, port int) string {
+	// A configured protocol corrects the discovery hint for this destination.
+	return fmt.Sprintf("%s/%s/%s/%d", project, service, container, port)
 }
 
 func (m *Manager) Containers() []Container {
@@ -271,9 +305,9 @@ func (m *Manager) Containers() []Container {
 func (m *Manager) Status() map[string]any {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	routeCount := len(m.autoRoutesLocked())
-	for _, route := range m.state.Routes {
-		if !route.Disabled {
+	routeCount := 0
+	for _, route := range m.effectiveRoutesLocked() {
+		if route.Enabled && !route.Disabled {
 			routeCount++
 		}
 	}
@@ -371,40 +405,42 @@ func (m *Manager) Sync(ctx context.Context) error {
 		return err
 	}
 	m.containers = containers
-	for key, route := range m.state.Routes {
-		if !route.Enabled {
-			route.Status = "disabled"
-			route.Message = "Disabled"
-			m.state.Routes[key] = route
-			continue
-		}
-		_, usable, found := m.resolve(route, containers)
-		if !found {
-			route.Status = "pending"
-			route.Message = "Destination not found in the runtime"
-		} else if len(usable) == 0 {
-			route.Status = "pending"
-			route.Message = fmt.Sprintf("Destination port %d is no longer advertised in the runtime inventory", route.Port)
-		} else {
-			reachable := false
-			message := "Route ready"
-			for _, c := range usable {
-				if net.ParseIP(c.Address) != nil {
-					reachable = true
-					break
-				}
-				if c.DiscoverErr != "" {
-					message = c.DiscoverErr
-				}
+	for _, stored := range []map[string]Route{m.state.Routes, m.state.Overrides} {
+		for key, route := range stored {
+			if !route.Enabled {
+				route.Status = "disabled"
+				route.Message = "Disabled"
+				stored[key] = route
+				continue
 			}
-			if reachable {
-				route.Status = "active"
-			} else {
+			_, usable, found := m.resolve(route, containers)
+			if !found {
 				route.Status = "pending"
+				route.Message = "Destination not found in the runtime"
+			} else if len(usable) == 0 {
+				route.Status = "pending"
+				route.Message = fmt.Sprintf("Destination port %d is no longer advertised in the runtime inventory", route.Port)
+			} else {
+				reachable := false
+				message := "Route ready"
+				for _, c := range usable {
+					if net.ParseIP(c.Address) != nil {
+						reachable = true
+						break
+					}
+					if c.DiscoverErr != "" {
+						message = c.DiscoverErr
+					}
+				}
+				if reachable {
+					route.Status = "active"
+				} else {
+					route.Status = "pending"
+				}
+				route.Message = message
 			}
-			route.Message = message
+			stored[key] = route
 		}
-		m.state.Routes[key] = route
 	}
 	if err := m.ensureCertificatesLocked(); err != nil {
 		m.lastError = err.Error()
@@ -434,11 +470,13 @@ func (m *Manager) Sync(ctx context.Context) error {
 }
 
 func (m *Manager) markRoutesPendingLocked(message string) {
-	for key, route := range m.state.Routes {
-		if route.Enabled {
-			route.Status = "pending"
-			route.Message = message
-			m.state.Routes[key] = route
+	for _, stored := range []map[string]Route{m.state.Routes, m.state.Overrides} {
+		for key, route := range stored {
+			if route.Enabled {
+				route.Status = "pending"
+				route.Message = message
+				stored[key] = route
+			}
 		}
 	}
 	_ = atomicJSON(filepath.Join(m.dataDir, "state.json"), m.state)
@@ -491,11 +529,7 @@ func (m *Manager) resolve(route Route, containers []Container) ([]Container, []C
 
 func (m *Manager) buildDynamicLocked() (map[string]any, []Port, []string, error) {
 	containers := append([]Container(nil), m.containers...)
-	routes := make([]Route, 0, len(m.state.Routes))
-	for _, r := range m.state.Routes {
-		routes = append(routes, r)
-	}
-	routes = append(routes, m.autoRoutesLocked()...)
+	routes := m.effectiveRoutesLocked()
 	portsByKey := map[string]Port{}
 	for _, r := range routes {
 		if r.Disabled || !r.Enabled {
@@ -721,7 +755,7 @@ func safeName(s string) string {
 func certID(host string) string { h := sha256.Sum256([]byte(host)); return hex.EncodeToString(h[:8]) }
 
 func (m *Manager) ensureCertificatesLocked() error {
-	for _, r := range m.state.Routes {
+	for _, r := range m.effectiveRoutesLocked() {
 		if r.Disabled || !r.Enabled || !r.TLS || r.Protocol != "http" {
 			continue
 		}
@@ -733,6 +767,9 @@ func (m *Manager) ensureCertificatesLocked() error {
 }
 
 func (m *Manager) SaveRoute(route Route, owner string, existingKey string) error {
+	if owner == "ui" && (route.TLS || strings.EqualFold(route.Protocol, "https")) {
+		route.ListenPort = 443
+	}
 	if err := route.Normalize(owner); err != nil {
 		return err
 	}
@@ -758,58 +795,157 @@ func (m *Manager) SaveRoute(route Route, owner string, existingKey string) error
 }
 
 func (m *Manager) UpdatePanelRoute(key string, route Route) error {
-	m.mu.RLock()
-	existing, ok := m.state.Routes[key]
-	m.mu.RUnlock()
-	if !ok {
-		return errors.New("route not found")
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.reloadStateLocked(); err != nil {
+		return err
 	}
-	if existing.Owner != "ui" {
-		return errors.New("automatic and dock.yml routes must be changed in their source configuration")
+	var existing Route
+	found := false
+	for _, current := range m.effectiveRoutesLocked() {
+		if routeKey(current.Owner, current.ID) == key {
+			existing, found = current, true
+			break
+		}
+	}
+	if !found {
+		if current, ok := m.state.Overrides[key]; ok {
+			existing, found = current, true
+		}
+	}
+	if !found {
+		return errors.New("route not found")
 	}
 	if route.ID != existing.ID {
 		return errors.New("route ID cannot be changed")
 	}
+	if route.TLS || strings.EqualFold(route.Protocol, "https") {
+		route.ListenPort = 443
+	}
 	if err := route.Normalize(existing.Owner); err != nil {
 		return err
 	}
+	if existing.Owner != "ui" && (route.Project != existing.Project || route.Service != existing.Service || route.Container != existing.Container || route.Port != existing.Port) {
+		return errors.New("the destination and container port are managed by the route source")
+	}
 	route.Enabled = existing.Enabled
+	route.Disabled = existing.Disabled
 	route.CreatedAt = existing.CreatedAt
-	if err := m.validateConflicts([]Route{route}, ""); err != nil {
+	if err := m.validateEffectiveRoute(route, key); err != nil {
 		return err
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.state.Routes[key]; !ok {
-		return errors.New("route not found")
+	if m.state.Overrides == nil {
+		m.state.Overrides = map[string]Route{}
 	}
-	m.state.Routes[key] = route
+	if existing.Owner == "ui" || m.state.Routes[key].ID != "" {
+		m.state.Routes[key] = route
+	} else {
+		m.state.Overrides[key] = route
+	}
 	return atomicJSON(filepath.Join(m.dataDir, "state.json"), m.state)
 }
 
+func (m *Manager) validateEffectiveRoute(route Route, excludingKey string) error {
+	if !route.Enabled || route.Disabled {
+		return nil
+	}
+	for _, other := range m.effectiveRoutesLocked() {
+		if routeKey(other.Owner, other.ID) == excludingKey || !other.Enabled || other.Disabled {
+			continue
+		}
+		if route.Protocol == "http" && other.Protocol == "http" && route.Hostname == other.Hostname && (route.ListenPort == other.ListenPort || route.TLS && other.ListenPort == 80 || other.TLS && route.ListenPort == 80) {
+			return fmt.Errorf("hostname %s already has a route listener", route.Hostname)
+		}
+		if route.Protocol != "http" && route.Protocol == other.Protocol && route.ListenPort == other.ListenPort {
+			return fmt.Errorf("port conflict %s/%d", route.Protocol, route.ListenPort)
+		}
+	}
+	return nil
+}
+
 func (m *Manager) SetEnabled(key string, enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.reloadStateLocked(); err != nil {
+		return err
+	}
+	var r Route
+	found := false
+	for _, current := range m.effectiveRoutesLocked() {
+		if routeKey(current.Owner, current.ID) == key {
+			r, found = current, true
+			break
+		}
+	}
+	if !found {
+		return errors.New("route not found")
+	}
+	r.Disabled = false
+	r.Enabled = enabled
+	if err := m.validateEffectiveRoute(r, key); err != nil {
+		return err
+	}
+	if m.state.Overrides == nil {
+		m.state.Overrides = map[string]Route{}
+	}
+	if r.Owner == "ui" || m.state.Routes[key].ID != "" {
+		m.state.Routes[key] = r
+	} else {
+		m.state.Overrides[key] = r
+	}
+	return atomicJSON(filepath.Join(m.dataDir, "state.json"), m.state)
+}
+
+// ExportRoutes returns a project's effective routes in the same format as routes init.
+func (m *Manager) ExportRoutes(project string) (Manifest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.reloadStateLocked(); err != nil {
+		return Manifest{}, err
+	}
+	var routes []Route
+	for _, route := range m.effectiveRoutesLocked() {
+		if route.Project != project {
+			continue
+		}
+		if route.Service == "" {
+			return Manifest{}, fmt.Errorf("route %q targets a container directly; Compose project manifests use services", route.ID)
+		}
+		route.Disabled = route.Disabled || !route.Enabled
+		routes = append(routes, route)
+	}
+	if len(routes) == 0 {
+		return Manifest{}, fmt.Errorf("no dashboard routes found for Compose project %q", project)
+	}
+	sort.Slice(routes, func(i, j int) bool {
+		a, b := routes[i], routes[j]
+		if a.Service != b.Service {
+			return a.Service < b.Service
+		}
+		if a.Protocol != b.Protocol {
+			return a.Protocol < b.Protocol
+		}
+		if a.Port != b.Port {
+			return a.Port < b.Port
+		}
+		if a.Hostname != b.Hostname {
+			return a.Hostname < b.Hostname
+		}
+		return a.ListenPort < b.ListenPort
+	})
+	return StarterManifest(routes), nil
+}
+
+func (m *Manager) DeleteRoute(key string) error {
 	m.mu.Lock()
 	r, ok := m.state.Routes[key]
 	if !ok {
 		m.mu.Unlock()
 		return errors.New("route not found")
 	}
-	if r.Disabled {
+	if r.Owner != "ui" {
 		m.mu.Unlock()
-		return errors.New("route is disabled by its manifest; edit the configuration to enable it")
-	}
-	r.Enabled = enabled
-	m.state.Routes[key] = r
-	err := atomicJSON(filepath.Join(m.dataDir, "state.json"), m.state)
-	m.mu.Unlock()
-	return err
-}
-
-func (m *Manager) DeleteRoute(key string) error {
-	m.mu.Lock()
-	if _, ok := m.state.Routes[key]; !ok {
-		m.mu.Unlock()
-		return errors.New("route not found")
+		return errors.New("discovered and dock.yml routes cannot be deleted; disable them or export your route settings")
 	}
 	delete(m.state.Routes, key)
 	err := atomicJSON(filepath.Join(m.dataDir, "state.json"), m.state)
@@ -898,8 +1034,17 @@ func (m *Manager) ApplyManifest(path, projectOverride string, manifest Manifest)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for key, r := range m.state.Routes {
-		if r.Owner == owner && !seen[r.ID] {
+		if r.Owner == owner && !seen[r.ID] || r.Owner != owner && containsRouteSettings(normalized, r) {
 			delete(m.state.Routes, key)
+		}
+	}
+	// Applying a published snapshot transfers its automatic overrides to the file.
+	for key, r := range m.state.Overrides {
+		for _, configured := range normalized {
+			if discoveryTargetKey(r.Project, r.Service, r.Container, r.Port) == discoveryTargetKey(configured.Project, configured.Service, configured.Container, configured.Port) {
+				delete(m.state.Overrides, key)
+				break
+			}
 		}
 	}
 	for _, r := range normalized {
@@ -958,7 +1103,7 @@ func (m *Manager) validateConflicts(candidate []Route, owner string) error {
 	all := map[string]Route{}
 	m.mu.RLock()
 	for k, r := range m.state.Routes {
-		if r.Owner != owner {
+		if r.Owner != owner && !(filepath.IsAbs(owner) && containsRouteSettings(candidate, r)) {
 			all[k] = r
 		}
 	}
@@ -994,6 +1139,15 @@ func (m *Manager) validateConflicts(candidate []Route, owner string) error {
 		}
 	}
 	return nil
+}
+
+func containsRouteSettings(routes []Route, other Route) bool {
+	for _, route := range routes {
+		if route.Project == other.Project && route.Service == other.Service && route.Container == other.Container && route.Protocol == other.Protocol && route.Hostname == other.Hostname && route.Port == other.Port && route.ListenPort == other.ListenPort && route.TLS == other.TLS && route.RedirectTLS == other.RedirectTLS && (route.Enabled && !route.Disabled) == (other.Enabled && !other.Disabled) {
+			return true
+		}
+	}
+	return false
 }
 
 func Trust() error {

@@ -45,7 +45,7 @@ Dock discovers Compose projects and standalone containers separately. Recognized
 Generate `dock.yml` from the running Compose project in the current directory:
 
 ```sh
-dock init
+dock routes init
 ```
 
 Dock discovers the project and service names from the runtime. Each service key contains its route array directly, with readable protocols, relative hostnames and port mappings. No route IDs or project name need to be entered. `--force` replaces an existing manifest; `--file` selects another output path.
@@ -84,7 +84,7 @@ With a project named `example`, this creates `https://app.example.localhost`, fo
 
 For `https`, HTTP on port 80 always redirects to the selected HTTPS port: the custom example redirects to `https://app.example.localhost:8443`. An HTTPS route reserves HTTP port 80 for that hostname, so a separate HTTP route for the same hostname on port 80 cannot coexist with it. `tcp` and `udp` use raw port forwarding without hostnames or Dock-managed TLS. In the dashboard their entry address appears as `localhost:<host-port>` with a Dynamic badge, and the next line shows the host-to-container mapping; Dynamic identifies a listener managed by Dock, not a randomly selected port. Container-only TCP/UDP ports use the same port on the host. Custom listener ports must be above 1023; HTTP/HTTPS also support 80 and 443, and Dock reserves 9080 and 9180.
 
-Hostnames in the file are relative to the automatically detected project. `hostname: app` becomes `app.example.localhost`; `"*"` becomes `*.example.localhost`, and `"*.api"` becomes `*.api.example.localhost`. If an HTTP/HTTPS hostname is omitted, Dock uses the service name with punctuation replaced by hyphens. A hostname ending in `.localhost` is treated as an explicit full address. A service can contain multiple routes; use distinct hostnames or entry ports for different HTTP destinations. Add `disabled: true` to a route to remove its listener, proxy mapping and dashboard/CLI listing. Dock also suppresses automatic rediscovery of that destination. The route stays hidden until the configuration is enabled again; it is not shown with a Disabled status. Disabling a route through the dashboard remains a visible status toggle.
+Hostnames in the file are relative to the automatically detected project. `hostname: app` becomes `app.example.localhost`; `"*"` becomes `*.example.localhost`, and `"*.api"` becomes `*.api.example.localhost`. If an HTTP/HTTPS hostname is omitted, Dock uses the service name with punctuation replaced by hyphens. A hostname ending in `.localhost` is treated as an explicit full address. A service can contain multiple routes; use distinct hostnames or entry ports for different HTTP destinations. Add `disabled: true` to a route to disable its listener and proxy mapping. Disabled routes remain visible in the dashboard with a Disabled status.
 
 Apply the file from the project directory:
 
@@ -101,6 +101,51 @@ dock routes delete --file ./dock.yml
 ```
 
 Applying a manifest is atomic and idempotent. Internal IDs are derived automatically, and routes removed from the file are removed only from that manifest's ownership set. The daemon reloads CLI changes for both the dashboard and proxy configuration. Dock does not run Compose or edit its files. A configured route replaces automatic discovery for the same service and container port, including when the host port or hostname changes.
+
+The dashboard can change the hostname, entry port and protocol of any route and enable or disable it. Protocols can be corrected to HTTP, HTTPS, TCP or UDP when automatic discovery or a manifest picked the wrong one. For automatic and manifest routes, the destination and container port follow their source. In the dashboard, HTTPS always uses entry port 443 with an automatic HTTP redirect. Only routes created in the dashboard can change destinations or be deleted. When an applied manifest file is deleted, Dock removes its cached routes during the next refresh and resumes automatic discovery for the corresponding services. Save the effective dashboard configuration for version control with:
+
+```sh
+dock routes sync
+git diff -- dock.yml
+git add dock.yml
+git commit -m "Update Dock routes"
+```
+
+### Configuration commands
+
+| Command | Direction | Purpose |
+| --- | --- | --- |
+| `dock routes init` | Compose discovery → file | Create the initial configuration from the running project's discovered routes. Refuses to replace an existing file unless `--force` is supplied. |
+| `dock routes apply` | File → Dock | Load the configuration into Dock. Routes previously owned by that file are replaced by its current contents. |
+| `dock routes sync` | Dashboard → file | Write the selected project's effective routes, including dashboard edits, to the configuration file. Replaces an existing file. |
+
+All three default to `dock.yml`, support `--file` for another path and `--project` for an explicit Compose project, and use the same `version` / `services` YAML format. `init` and `sync` detect the running project from the current directory; `apply` detects it from the configuration file's directory. Generated service manifests contain one Compose project's routes. Direct container targets use the legacy `routes:` format and cannot be written by `sync`.
+
+`sync` is one-way: it saves Dock's current configuration to the file. It includes edited hostnames, corrected protocols, entry ports and disabled routes; it does not load file edits into Dock. Use `apply` after editing the YAML or checking out a version from Git. Dashboard changes are already active, so they do not need `apply` after `sync`.
+
+Typical workflows:
+
+```sh
+# Configure a project through YAML.
+dock routes init
+# Edit dock.yml.
+dock routes apply
+
+# Save subsequent dashboard edits for version control.
+dock routes sync
+git diff -- dock.yml
+
+# Apply a versioned configuration on another runtime.
+dock routes apply
+
+# Select a project and a custom configuration path explicitly.
+dock routes sync --file ./ops/dock.yml --project example
+dock routes apply --file ./ops/dock.yml --project example
+```
+
+`dock routes list` displays current routes and their status. `dock routes delete --file dock.yml` removes routes managed by that file from Dock; it keeps the YAML file and allows automatic discovery to resume. This command acts on a manifest's ownership set. Individual discovered or file-managed routes can be disabled in the dashboard.
+
+Use `dock routes help` for an overview or `dock routes init --help`, `dock routes apply --help`, and `dock routes sync --help` for command options. The former `dock routes export` command now directs users to `dock routes sync`.
 
 Existing flat `routes:` manifests remain supported for compatibility and standalone containers. The new generated `services:` format replaces IDs and explicit project/service fields on every route. Do not mix `services:` and legacy `routes:` in the same file.
 

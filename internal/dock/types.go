@@ -59,8 +59,9 @@ type Manifest struct {
 }
 
 type State struct {
-	Version int              `json:"version"`
-	Routes  map[string]Route `json:"routes"`
+	Version   int              `json:"version"`
+	Routes    map[string]Route `json:"routes"`
+	Overrides map[string]Route `json:"overrides,omitempty"`
 }
 
 var routeIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
