@@ -100,3 +100,71 @@ func TestConnectNetworksSkipsExistingPodmanNetwork(t *testing.T) {
 		t.Fatalf("connect calls = %d, want one call for the new network", connects)
 	}
 }
+
+func TestDiscoverDeclaredPortsAcrossImageTypes(t *testing.T) {
+	cases := []struct {
+		name, image     string
+		listed, exposed string
+		want            []Port
+	}{
+		{"http", "example/web", `[{"PrivatePort":8080,"Type":"tcp"}]`, `{"8080/tcp":{}}`, []Port{{8080, "tcp"}}},
+		{"database", "example/database", `[]`, `{"5432/tcp":{}}`, []Port{{5432, "tcp"}}},
+		{"shellless", "example/distroless", `[]`, `{"18791/tcp":{}}`, []Port{{18791, "tcp"}}},
+		{"udp", "example/udp", `[{"PrivatePort":15353,"Type":"udp"}]`, `{"15353/udp":{}}`, []Port{{15353, "udp"}}},
+		{"mixed", "example/mixed", `[]`, `{"18080/tcp":{},"15353/udp":{}}`, []Port{{15353, "udp"}, {18080, "tcp"}}},
+		{"no-declarations", "example/worker", `[]`, `{}`, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &Engine{Client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				w := httptest.NewRecorder()
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/containers/json":
+					fmt.Fprintf(w, `[{"Id":"fixture","Names":["/example-service-1"],"Image":%q,"State":"running","Labels":{"com.docker.compose.project":"example","com.docker.compose.service":"service"},"Ports":%s}]`, tc.image, tc.listed)
+				case r.Method == http.MethodGet && r.URL.Path == "/containers/fixture/json":
+					fmt.Fprintf(w, `{"Config":{"ExposedPorts":%s},"NetworkSettings":{"Networks":{"example_default":{"IPAddress":"172.18.0.2"}}}}`, tc.exposed)
+				default:
+					t.Errorf("unexpected runtime request (discovery must not exec): %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+				return w.Result(), nil
+			})}}
+			containers, err := e.Discover(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(containers) != 1 {
+				t.Fatalf("containers=%d", len(containers))
+			}
+			c := containers[0]
+			if len(c.Ports) != len(tc.want) {
+				t.Fatalf("ports=%v, want %v", c.Ports, tc.want)
+			}
+			for i, p := range tc.want {
+				if c.Ports[i] != p {
+					t.Fatalf("ports=%v, want %v", c.Ports, tc.want)
+				}
+			}
+			m := &Manager{containers: containers, state: State{Version: 1, Routes: map[string]Route{}}}
+			for _, p := range tc.want {
+				protocols := []string{p.Protocol}
+				if p.Protocol == "tcp" {
+					protocols = append(protocols, "http")
+				}
+				for _, protocol := range protocols {
+					_, usable, found := m.resolve(Route{Project: "example", Service: "service", Port: p.PrivatePort, Protocol: protocol}, containers)
+					if !found || len(usable) != 1 {
+						t.Fatalf("declared %d/%s rejected", p.PrivatePort, protocol)
+					}
+				}
+			}
+			if tc.name == "shellless" && len(m.DiscoveredRoutes("example")) != 0 {
+				t.Fatal("unknown protocol should require an explicit route")
+			}
+			_, usable, _ := m.resolve(Route{Project: "example", Service: "service", Port: 19999, Protocol: "tcp"}, containers)
+			if len(usable) != 0 {
+				t.Fatal("undeclared port accepted")
+			}
+		})
+	}
+}

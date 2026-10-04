@@ -1,7 +1,7 @@
 export type PortInfo = { privatePort: number; protocol: string }
 export type ContainerInfo = {
   id: string; name: string; image: string; state: string; project?: string; service?: string
-  networks: string[]; ports: PortInfo[]; hasTraefikRules: boolean; discoveryError?: string; portDiscoveryError?: string
+  networks: string[]; ports: PortInfo[]; hasTraefikRules: boolean; discoveryError?: string
 }
 export type RouteInfo = {
   id: string; hostname?: string; project?: string; service?: string; container?: string

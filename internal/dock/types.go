@@ -30,7 +30,6 @@ type Container struct {
 	Address          string            `json:"address,omitempty"`
 	HasTraefik       bool              `json:"hasTraefikRules"`
 	DiscoverErr      string            `json:"discoveryError,omitempty"`
-	PortDiscoveryErr string            `json:"portDiscoveryError,omitempty"`
 }
 
 type Route struct {

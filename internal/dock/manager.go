@@ -209,12 +209,9 @@ func (m *Manager) discoverRoutesLocked(suppressManual bool) []Route {
 			continue
 		}
 		for _, p := range c.Ports {
-			if p.Protocol != "tcp" || p.PrivatePort == 443 || (p.PrivatePort < 1024 && p.PrivatePort != 80) {
+			protocol := knownRouteProtocol(p)
+			if protocol == "" {
 				continue
-			}
-			protocol := "http"
-			if isKnownTCPServicePort(p.PrivatePort) {
-				protocol = "tcp"
 			}
 			container := c.Name
 			if c.Project != "" && c.Service != "" {
@@ -223,15 +220,12 @@ func (m *Manager) discoverRoutesLocked(suppressManual bool) []Route {
 			if manualTargets[discoveryTargetKey(c.Project, c.Service, container, protocol, p.PrivatePort)] {
 				continue
 			}
-			if isKnownTCPServicePort(p.PrivatePort) {
+			if protocol == "tcp" {
 				old, exists := tcpCandidates[p.PrivatePort]
 				if exists && (old.Project != c.Project || old.Service != c.Service || (c.Service == "" && old.Name != c.Name)) {
 					ambiguousTCP[p.PrivatePort] = true
 				}
 				tcpCandidates[p.PrivatePort] = c
-				continue
-			}
-			if !isKnownHTTPPort(p.PrivatePort) {
 				continue
 			}
 			if c.Project != "" && c.Service != "" {
@@ -256,24 +250,6 @@ func (m *Manager) discoverRoutesLocked(suppressManual bool) []Route {
 
 func discoveryTargetKey(project, service, container, protocol string, port int) string {
 	return fmt.Sprintf("%s/%s/%s/%s/%d", project, service, container, protocol, port)
-}
-
-func isKnownTCPServicePort(port int) bool {
-	switch port {
-	case 1025, 1110, 1433, 1521, 1883, 3306, 5432, 5672, 6379, 9042, 11211, 27017, 27018, 50000:
-		return true
-	default:
-		return false
-	}
-}
-
-func isKnownHTTPPort(port int) bool {
-	switch port {
-	case 80, 2019, 3000, 3001, 4200, 5000, 5173, 8000, 8001, 8025, 8080, 8081, 8082, 9000, 9001, 9090:
-		return true
-	default:
-		return false
-	}
 }
 
 func (m *Manager) Containers() []Container {
@@ -365,17 +341,9 @@ func (m *Manager) watch(ctx context.Context) {
 		}
 		dec := json.NewDecoder(stream)
 		for ctx.Err() == nil {
-			var ev struct {
-				Action string `json:"Action"`
-				Status string `json:"status"`
-			}
+			var ev map[string]any
 			if err := dec.Decode(&ev); err != nil {
 				break
-			}
-			// Port inspection itself creates exec events. Ignore them to avoid a
-			// discovery/exec/discovery feedback loop.
-			if strings.HasPrefix(ev.Action, "exec_") || strings.HasPrefix(ev.Status, "exec_") {
-				continue
 			}
 			_ = m.Sync(ctx)
 		}

@@ -199,10 +199,6 @@ func (e *Engine) Discover(ctx context.Context) ([]Container, error) {
 		}
 		// Docker's list response includes exposed ports. Include inspect values too for engines
 		// whose list endpoint omits an unbound private port.
-		seen := map[string]bool{}
-		for _, p := range c.Ports {
-			seen[strconv.Itoa(p.PrivatePort)+"/"+p.Protocol] = true
-		}
 		for spec := range detail.Config.ExposedPorts {
 			parts := strings.Split(spec, "/")
 			port, _ := strconv.Atoi(parts[0])
@@ -210,34 +206,11 @@ func (e *Engine) Discover(ctx context.Context) ([]Container, error) {
 			if len(parts) > 1 {
 				proto = strings.ToLower(parts[1])
 			}
-			key := strconv.Itoa(port) + "/" + proto
-			if port > 0 && !seen[key] {
+			if port > 0 {
 				c.Ports = append(c.Ports, Port{PrivatePort: port, Protocol: proto})
-				seen[key] = true
 			}
 		}
-		// Image metadata is incomplete for applications which open additional
-		// listeners at runtime. Read the live socket tables in their network namespace.
-		if c.State == "running" && c.Name != "dock-traefik" {
-			ports, err := e.listeningPorts(ctx, c.ID)
-			if err != nil {
-				c.PortDiscoveryErr = fmt.Sprintf("live port discovery unavailable; using runtime metadata: %s", err)
-			} else {
-				for _, p := range ports {
-					key := strconv.Itoa(p.PrivatePort) + "/" + p.Protocol
-					if !seen[key] {
-						c.Ports = append(c.Ports, p)
-						seen[key] = true
-					}
-				}
-			}
-		}
-		sort.Slice(c.Ports, func(i, j int) bool {
-			if c.Ports[i].PrivatePort == c.Ports[j].PrivatePort {
-				return c.Ports[i].Protocol < c.Ports[j].Protocol
-			}
-			return c.Ports[i].PrivatePort < c.Ports[j].PrivatePort
-		})
+		c.Ports = uniquePorts(c.Ports)
 		c.Networks = uniqueSorted(c.Networks)
 		out = append(out, c)
 	}

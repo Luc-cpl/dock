@@ -117,13 +117,52 @@ services:
     # No ports: publication is needed for Dock.
 ```
 
-The application still listens on port 80 inside each container. Dock discovers that internal port and exposes each project through its own `web.<project>.localhost` hostname. `expose:` describes internal ports and is optional for live socket discovery; it does not publish them on the host. Applications must bind to a container network interface (usually `0.0.0.0` or `::`), rather than only to container loopback. Keep the default bridge network isolation; `network_mode: host` shares the host network and defeats this separation.
+The application still listens on port 80 inside each container. Dock discovers that internal port and exposes each project through its own `web.<project>.localhost` hostname. Port discovery uses image `EXPOSE` metadata and Compose `expose:` declarations; neither publishes a port on the host. If the image omits a port, declare it with `expose:` in Compose. Applications must bind to a container network interface (usually `0.0.0.0` or `::`), rather than only to container loopback. Keep the default bridge network isolation; `network_mode: host` shares the host network and defeats this separation.
 
 HTTP/HTTPS routes can share one host listener because the hostname selects the destination. Ordinary TCP/UDP streams do not carry an HTTP hostname, so routes to different applications must use different host listener ports. Dock avoids ambiguous automatic TCP mappings and validates explicitly configured listeners.
 
 Dock starts Traefik Proxy v3 on loopback ports 80, 443 and 9180 (dashboard). For discovered application ports it publishes the matching port on loopback. Traefik joins the bridge networks used by routes and honors `traefik.docker.network` when selecting an upstream. A newly needed port or network can require Traefik recreation. The dashboard reports unavailable destinations and collisions. Keep the runtime socket private: access to the Docker-compatible API is equivalent to control of that runtime.
 
-Automatic discovery combines runtime port metadata with live TCP/UDP socket tables inside each container. This discovers listeners missing from image `EXPOSE` metadata, without scanning or publishing host ports. The live inspection includes listening TCP sockets and bound UDP server sockets accessible from the container network; loopback-only listeners and client connections are excluded from its results. Socket inspection uses a short read-only command with the container's configured user and requires a POSIX shell and readable `/proc/net`. If inspection is unavailable, Dock retains metadata discovery and reports the limitation in the dashboard. Known HTTP ports include 9000 and 9001; unrecognized application protocols remain available for explicit routes.
+Automatic port discovery reads Docker-compatible API metadata (`Ports` and `Config.ExposedPorts`). It does not execute commands inside containers, inspect live sockets, or depend on shell utilities in the image. HTTP, TCP and UDP ports are included in the inventory regardless of application type. Automatic route creation is a separate step: known HTTP ports create HTTP routes, known TCP service ports create TCP routes when unambiguous, and other declared ports require an explicit route in `dock.yml`. Port numbers alone cannot determine the application protocol reliably. A port missing from runtime metadata is not discovered; declare it with Compose `expose:` without publishing it on the host. A route in `dock.yml` selects an inventoried destination and does not declare a new runtime port.
+
+### Known application ports
+
+Automatic routing recognizes these declared container ports:
+
+| Application | Container ports | Route protocol |
+| --- | --- | --- |
+| MySQL / MariaDB | 3306 | TCP |
+| MySQL X Protocol | 33060 | TCP |
+| MongoDB | 27017, 27018, 27019 | TCP |
+| PostgreSQL | 5432 | TCP |
+| Redis / Memcached | 6379 / 11211 | TCP |
+| SQL Server / Oracle / Cassandra / DB2 | 1433 / 1521 / 9042 / 50000 | TCP |
+| MQTT / AMQP | 1883 / 5672 | TCP |
+| Mail test servers | 1025, 1110 | TCP |
+| Vite dev / preview | 5173 / 4173 | HTTP |
+| Other development servers | 3000, 3001, 4200, 5000 | HTTP |
+| Web servers, admin interfaces and APIs | 80, 2019, 8000, 8001, 8025, 8080, 8081, 8082, 9000, 9001, 9090 | HTTP |
+
+References: [MySQL protocols](https://dev.mysql.com/doc/mysql-port-reference/en/mysql-port-reference-tables.html), [MongoDB ports](https://www.mongodb.com/docs/manual/reference/default-mongodb-port/), and Vite [dev](https://vite.dev/config/server-options) / [preview](https://vite.dev/config/preview-options) ports.
+
+Classification uses the **container port**, even when Docker maps a different host port. TCP routes use `localhost:<entry-port>`; if several services use the same TCP port, define distinct entry ports in `dock.yml`. For example:
+
+```yaml
+version: 1
+services:
+  mysql:
+    - protocol: tcp
+      port: "13306:3306"
+  mongodb:
+    - protocol: tcp
+      port: "37017:27017"
+  frontend:
+    - hostname: frontend
+      protocol: http
+      port: "5173:5173"
+```
+
+Vite must listen on a container network interface (`--host 0.0.0.0`). Declare its port with Compose `expose:` when the image does not include it. If Vite selects a different port because its preferred port is occupied, use `--strictPort` to keep the declaration aligned or configure that port explicitly.
 
 ## Remove Dock resources
 
