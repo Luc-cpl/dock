@@ -1,0 +1,281 @@
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  Alert, AppBar, Avatar, Box, Button, Chip, CircularProgress, Container,
+  Dialog, DialogActions, DialogContent, DialogTitle, Divider, FormControl,
+  FormControlLabel, IconButton, InputLabel, LinearProgress, MenuItem,
+  Paper, Select, Snackbar, Stack, Switch, Tab, Table, TableBody, TableCell,
+  TableContainer, TableHead, TableRow, Tabs, TextField, Toolbar, Tooltip,
+  Typography,
+} from '@mui/material'
+import AddRounded from '@mui/icons-material/AddRounded'
+import ArrowOutwardRounded from '@mui/icons-material/ArrowOutwardRounded'
+import AutorenewRounded from '@mui/icons-material/AutorenewRounded'
+import CodeRounded from '@mui/icons-material/CodeRounded'
+import DeleteOutlineRounded from '@mui/icons-material/DeleteOutlineRounded'
+import DnsRounded from '@mui/icons-material/DnsRounded'
+import EditRounded from '@mui/icons-material/EditRounded'
+import ExpandMoreRounded from '@mui/icons-material/ExpandMoreRounded'
+import ChevronRightRounded from '@mui/icons-material/ChevronRightRounded'
+import FolderOpenRounded from '@mui/icons-material/FolderOpenRounded'
+import HubRounded from '@mui/icons-material/HubRounded'
+import LanRounded from '@mui/icons-material/LanRounded'
+import LockRounded from '@mui/icons-material/LockRounded'
+import OpenInNewRounded from '@mui/icons-material/OpenInNewRounded'
+import SettingsRounded from '@mui/icons-material/SettingsRounded'
+import TerminalRounded from '@mui/icons-material/TerminalRounded'
+import { ContainerInfo, RouteInfo, RuntimeStatus } from './types'
+import './style.css'
+
+type Routed = { key: string; route: RouteInfo }
+type Toast = { message: string; severity: 'success' | 'error' | 'info' }
+
+const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
+  const response = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', ...init?.headers } })
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`
+    try { message = (await response.json()).error || message } catch { /* keep status text */ }
+    throw new Error(message)
+  }
+  if (response.status === 204) return undefined as T
+  return response.json() as Promise<T>
+}
+
+const destination = (c: ContainerInfo) => c.service ? `${c.service}.${c.project}` : c.name
+const dot = (tone: string) => <Box component="span" className="status-dot" sx={{ bgcolor: tone }} />
+
+function App() {
+  const [tab, setTab] = useState(0)
+  const [containers, setContainers] = useState<ContainerInfo[]>([])
+  const [routes, setRoutes] = useState<Routed[]>([])
+  const [status, setStatus] = useState<RuntimeStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [dialog, setDialog] = useState(false)
+  const [editing, setEditing] = useState<Routed | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [toast, setToast] = useState<Toast | null>(null)
+  const [query, setQuery] = useState('')
+  const [selectedProject, setSelectedProject] = useState<string | null>(null)
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set())
+  const [form, setForm] = useState({ id: '', hostname: '', target: '', protocol: 'http', port: '', listenPort: '', tls: true, redirectHttps: false })
+
+  const refresh = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true)
+    try {
+      const [s, c, r] = await Promise.all([
+        api<RuntimeStatus>('/api/status'),
+        api<ContainerInfo[]>('/api/containers'),
+        api<Routed[]>('/api/routes'),
+      ])
+      setStatus(s)
+      setContainers(c.map(container => ({ ...container, ports: container.ports ?? [], networks: container.networks ?? [] })))
+      setRoutes(r)
+    } catch (error) {
+      if (!quiet) setToast({ message: (error as Error).message, severity: 'error' })
+    } finally { if (!quiet) setLoading(false) }
+  }, [])
+
+  useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(true), 3000); return () => window.clearInterval(timer) }, [refresh])
+
+  const targets = useMemo(() => {
+    const found = new Map<string, ContainerInfo>()
+    for (const c of containers) {
+      const key = c.service ? `service:${c.project}/${c.service}` : `container:${c.name}`
+      if (!found.has(key)) found.set(key, c)
+    }
+    return [...found.entries()].map(([key, c]) => ({ key, label: c.service ? `${c.service}  ·  ${c.project}` : c.name, c }))
+  }, [containers])
+
+  const selectedTarget = targets.find(t => t.key === form.target)
+  const selectedPorts = selectedTarget?.c.ports || []
+  const activeCount = containers.filter(c => c.state === 'running').length
+  const projectGroups = useMemo(() => {
+    const groups = new Map<string, ContainerInfo[]>()
+    containers.filter(c => c.project).forEach(c => groups.set(c.project!, [...(groups.get(c.project!) || []), c]))
+    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))
+  }, [containers])
+  const looseContainers = containers.filter(c => !c.project)
+  const filteredRoutes = routes.filter(({ route }) => `${route.hostname || ''} ${route.id} ${route.service || ''} ${route.project || ''} ${route.container || ''} ${route.protocol}`.toLowerCase().includes(query.toLowerCase()))
+  const routeGroups = useMemo(() => {
+    const groups = new Map<string, Routed[]>()
+    filteredRoutes.forEach(item => {
+      const project = item.route.project || (item.route.service ? 'Project not identified' : 'Standalone routes')
+      groups.set(project, [...(groups.get(project) || []), item])
+    })
+    return [...groups.entries()].sort(([a], [b]) => a === 'Standalone routes' ? 1 : b === 'Standalone routes' ? -1 : a.localeCompare(b))
+  }, [filteredRoutes])
+  const toggleGroup = (group: string) => setCollapsedGroups(previous => {
+    const next = new Set(previous)
+    if (next.has(group)) next.delete(group)
+    else next.add(group)
+    return next
+  })
+
+  const openNewRoute = () => {
+    const target = targets[0]
+    const suggested = target?.c.ports.some(p => p.privatePort === 5432) ? 'tcp' : 'http'
+    const port = target?.c.ports.find(p => p.protocol === 'tcp')?.privatePort
+    setEditing(null)
+    setForm({ id: '', hostname: '', target: target?.key || '', protocol: suggested, port: port ? String(port) : '', listenPort: '', tls: suggested === 'http', redirectHttps: false })
+    setDialog(true)
+  }
+
+  const openEditRoute = (item: Routed) => {
+    const route = item.route
+    const target = targets.find(t => route.service
+      ? t.c.service === route.service && t.c.project === route.project
+      : t.c.name === route.container)
+    setEditing(item)
+    setForm({ id: route.id, hostname: route.hostname || '', target: target?.key || '', protocol: route.protocol, port: String(route.port), listenPort: route.listenPort ? String(route.listenPort) : '', tls: route.tls, redirectHttps: route.redirectHttps })
+    setDialog(true)
+  }
+
+  const saveRoute = async () => {
+    setSaving(true)
+    try {
+      const selected = targets.find(t => t.key === form.target)
+      const original = editing?.route
+      if (!selected && !original) throw new Error('Select a discovered service or container.')
+      if (!form.id.trim() || (form.protocol === 'http' && !form.hostname.trim())) throw new Error('Enter an ID and a hostname for HTTP routes.')
+      const route: RouteInfo = {
+        id: original?.id || form.id.trim(), hostname: form.hostname.trim(),
+        project: selected ? (selected.c.project || undefined) : original?.project,
+        service: selected ? (selected.c.service || undefined) : original?.service,
+        container: selected ? (selected.c.service ? undefined : selected.c.name) : original?.container,
+        protocol: form.protocol, port: Number(form.port), listenPort: form.listenPort ? Number(form.listenPort) : undefined,
+        tls: form.protocol === 'http' && form.tls, redirectHttps: form.protocol === 'http' && form.tls, enabled: original?.enabled ?? true,
+      }
+      if (editing) await api(`/api/routes/${encodeURIComponent(editing.key)}`, { method: 'PUT', body: JSON.stringify({ route }) })
+      else await api('/api/routes', { method: 'POST', body: JSON.stringify(route) })
+      setDialog(false); setEditing(null); setToast({ message: editing ? 'Route updated.' : 'Route saved and applied.', severity: 'success' }); await refresh(true)
+    } catch (error) { setToast({ message: (error as Error).message, severity: 'error' }) } finally { setSaving(false) }
+  }
+
+  const toggleRoute = async (item: Routed, enabled: boolean) => {
+    try { await api(`/api/routes/${encodeURIComponent(item.key)}`, { method: 'PUT', body: JSON.stringify({ enabled }) }); await refresh(true) }
+    catch (error) { setToast({ message: (error as Error).message, severity: 'error' }) }
+  }
+  const removeRoute = async (item: Routed) => {
+    try { await api(`/api/routes/${encodeURIComponent(item.key)}`, { method: 'DELETE' }); setToast({ message: 'Route removed.', severity: 'success' }); await refresh(true) }
+    catch (error) { setToast({ message: (error as Error).message, severity: 'error' }) }
+  }
+
+  return <Box className="app-shell">
+    <AppBar position="sticky" elevation={0} color="inherit" className="topbar">
+      <Toolbar className="topbar-inner">
+        <Stack direction="row" alignItems="center" spacing={1.25}>
+          <Avatar className="brand-mark"><HubRounded fontSize="small" /></Avatar>
+          <Typography fontWeight={750} letterSpacing="-.04em" fontSize={19}>dock</Typography>
+          <Chip size="small" label="LOCAL GATEWAY" className="top-chip" />
+        </Stack>
+        <Box sx={{ flex: 1 }} />
+        <Stack direction="row" spacing={1} alignItems="center" className="runtime-indicator">
+          {dot(status?.ok ? '#10b981' : '#d97706')}
+          <Typography variant="body2" color="text.secondary">{status?.ok ? 'Gateway online' : 'Checking runtime'}</Typography>
+        </Stack>
+        <Tooltip title="Refresh inventory"><IconButton onClick={() => void refresh()} sx={{ ml: 1 }}><AutorenewRounded /></IconButton></Tooltip>
+        <Button variant="contained" startIcon={<AddRounded />} onClick={openNewRoute} sx={{ ml: 1.5 }} className="desktop-action">New route</Button>
+      </Toolbar>
+    </AppBar>
+
+    <Container maxWidth="xl" className="page-content">
+      <Box className="welcome-row">
+        <Box>
+          <Typography variant="overline" color="primary.main" fontWeight={700} letterSpacing=".1em">CONTAINER GATEWAY</Typography>
+          <Typography variant="h1">Your services, in one place.</Typography>
+          <Typography color="text.secondary" mt={0.65}>Discover, organize, and access your containers through local routes.</Typography>
+        </Box>
+        <Button variant="contained" startIcon={<AddRounded />} onClick={openNewRoute} className="mobile-action">New route</Button>
+      </Box>
+
+      {status?.error && <Alert severity="warning" sx={{ mb: 2 }}>{status.error}</Alert>}
+      {status?.engine?.error && <Alert severity="error" sx={{ mb: 2 }}>Runtime disconnected: {status.engine.error}</Alert>}
+      {loading && <LinearProgress sx={{ mb: 1.5, borderRadius: 3 }} />}
+
+      <Box className="stats-grid">
+        <StatCard icon={<DnsRounded />} label="Running containers" value={String(activeCount)} detail={`${containers.length} discovered`} tone="indigo" />
+        <StatCard icon={<LanRounded />} label="Local routes" value={String(routes.length)} detail={`${routes.filter(x => x.route.status === 'active').length} ready`} tone="teal" />
+        <StatCard icon={<LockRounded />} label="Trusted HTTPS" value={String(routes.filter(x => x.route.tls).length)} detail="Local certificates" tone="violet" />
+        <StatCard icon={<HubRounded />} label="Runtime" value={status?.engine?.socket ? 'Connected' : 'Waiting'} detail={status?.engine?.socket?.includes('podman') ? 'Podman · local socket' : 'Docker API · local socket'} tone="amber" compact />
+      </Box>
+
+      <Paper className="workspace-card">
+        <Box className="workspace-top">
+          <Tabs value={tab} onChange={(_, v) => setTab(v)} className="workspace-tabs">
+            <Tab icon={<LanRounded fontSize="small" />} iconPosition="start" label={`Routes ${routes.length || ''}`} />
+            <Tab icon={<FolderOpenRounded fontSize="small" />} iconPosition="start" label={`Projects ${projectGroups.length + looseContainers.length || ''}`} />
+            <Tab icon={<SettingsRounded fontSize="small" />} iconPosition="start" label="Settings" />
+          </Tabs>
+          <TextField size="small" placeholder={tab === 1 ? 'Search projects and containers...' : 'Search routes...'} value={query} onChange={e => setQuery(e.target.value)} className="search-field" />
+        </Box>
+        <Divider />
+        {tab === 0 && <TableContainer className="table-scroll"><Table size="medium">
+          <TableHead><TableRow><TableCell>Route / listener</TableCell><TableCell>Destination</TableCell><TableCell>Source</TableCell><TableCell>Protocol</TableCell><TableCell>Status</TableCell><TableCell align="right">Active</TableCell><TableCell width={48} /></TableRow></TableHead>
+          <TableBody>
+            {routeGroups.flatMap(([group,items]) => [<TableRow key={`group:${group}`} className="route-group-row"><TableCell colSpan={7}><Button className="route-group-toggle" onClick={()=>toggleGroup(group)} aria-expanded={!collapsedGroups.has(group)} aria-label={`${collapsedGroups.has(group) ? 'Expand' : 'Collapse'} ${group}`}><Stack direction="row" alignItems="center" spacing={1}>{collapsedGroups.has(group) ? <ChevronRightRounded fontSize="small" /> : <ExpandMoreRounded fontSize="small" />}<FolderOpenRounded fontSize="small" /><Typography fontWeight={700}>{group}</Typography><Chip size="small" label={items.length} /></Stack></Button></TableCell></TableRow>, ...(collapsedGroups.has(group) ? [] : items.map(item => { const r=item.route;const host=`${r.tls?'https':'http'}://${r.hostname}${r.listenPort&&r.listenPort!==(r.tls?443:80)?`:${r.listenPort}`:''}`;return <TableRow key={item.key} hover>
+              <TableCell><Stack direction="row" alignItems="center" spacing={1}><Avatar className="table-icon"><LanRounded fontSize="small" /></Avatar><Box><Stack direction="row" alignItems="center" spacing={.75}><Typography fontWeight={650} fontSize={13.5}>{r.protocol === 'http' ? (r.hostname || r.id) : `localhost:${r.listenPort}`}</Typography>{r.protocol !== 'http'&&<Tooltip title="Local port listener managed dynamically by Dock"><Chip size="small" label="Dynamic" className="auto-chip" /></Tooltip>}</Stack><Typography variant="caption" color="text.secondary">{r.listenPort ? `listen ${r.listenPort} → container ${r.port}` : `container port ${r.port}`}</Typography></Box></Stack></TableCell>
+              <TableCell><Typography fontSize={13}>{r.service ? `${r.service}.${r.project}` : `${r.container || '—'}${r.project ? ` · ${r.project}` : ''}`}</Typography></TableCell>
+              <TableCell><Tooltip title={r.owner && r.owner !== 'auto' && r.owner !== 'ui' ? r.owner : ''}><Chip size="small" label={r.owner === 'auto' ? 'Automatic' : r.owner === 'ui' ? 'Dashboard' : 'dock.yml'} className={r.owner === 'auto' ? 'auto-chip' : 'protocol-chip'} /></Tooltip></TableCell>
+              <TableCell>{r.protocol === 'http' && r.tls ? <Chip icon={<LockRounded />} size="small" label="HTTPS" className="tls-chip" /> : <Chip size="small" label={r.protocol.toUpperCase()} className="protocol-chip" />}</TableCell>
+              <TableCell><Stack direction="row" alignItems="center" spacing={.75}>{dot(r.status==='active'?'#10b981':r.status==='disabled'?'#98a2b3':'#d97706')}<Typography fontSize={12.5} color={r.status==='active'?'success.main':'text.secondary'}>{r.status==='active'?'Active':r.status==='disabled'?'Disabled':'Pending'}</Typography></Stack></TableCell>
+              <TableCell align="right"><Switch size="small" checked={r.enabled} disabled={r.owner==='auto'} onChange={e=>void toggleRoute(item,e.target.checked)} /></TableCell>
+              <TableCell><Tooltip title="Open route"><span><IconButton size="small" component="a" href={host} target="_blank" rel="noreferrer" disabled={r.protocol!=='http'||r.hostname?.startsWith('*.')}><OpenInNewRounded fontSize="small" /></IconButton></span></Tooltip><Tooltip title={r.owner==='ui'?'Edit route':'Edit the dock.yml configuration'}><span><IconButton size="small" color="inherit" disabled={r.owner!=='ui'} onClick={()=>openEditRoute(item)}><EditRounded fontSize="small" /></IconButton></span></Tooltip><Tooltip title={r.owner==='auto'?'Automatic routes are managed by Dock':'Remove'}><span><IconButton size="small" color="inherit" disabled={r.owner==='auto'} onClick={()=>void removeRoute(item)}><DeleteOutlineRounded fontSize="small" /></IconButton></span></Tooltip></TableCell>
+            </TableRow>}))])}
+            {!filteredRoutes.length&&<TableRow><TableCell colSpan={7}><EmptyState icon={<LanRounded />} title={routes.length?'No routes found':'No routes configured'} detail={routes.length?'Try another search term.':'Create a route or apply a dock.yml file from your project.'} action={!routes.length&&<Button startIcon={<AddRounded />} onClick={openNewRoute}>Create your first route</Button>} /></TableCell></TableRow>}
+          </TableBody>
+        </Table></TableContainer>}
+        {tab === 1 && <Box sx={{p:2.5}}>
+          {selectedProject ? <>
+            <Button onClick={()=>setSelectedProject(null)} sx={{mb:1}}>← All projects</Button>
+            <Typography variant="h2" sx={{fontSize:20,fontWeight:700,mb:1.5}}>{selectedProject}</Typography>
+            <Box className="container-grid" sx={{p:0}}>{(projectGroups.find(([name])=>name===selectedProject)?.[1] || []).filter(c=>`${c.name} ${c.service} ${c.image}`.toLowerCase().includes(query.toLowerCase())).map(c=><ContainerCard key={c.id} container={c} />)}</Box>
+          </> : <>
+            {!!projectGroups.length && <><Typography variant="overline" color="text.secondary" fontWeight={700}>Projects</Typography><Box className="container-grid" sx={{p:0,mt:1,mb:2}}>
+              {projectGroups.filter(([name, cs])=>`${name} ${cs.map(c=>`${c.service} ${c.name} ${c.image}`).join(' ')}`.toLowerCase().includes(query.toLowerCase())).map(([name, cs])=><Paper key={name} className="service-card project-card" onClick={()=>setSelectedProject(name)}><Stack direction="row" alignItems="center" spacing={1.5}><Avatar className="service-avatar"><FolderOpenRounded /></Avatar><Box flex={1}><Typography fontWeight={700}>{name}</Typography><Typography variant="caption" color="text.secondary">{cs.length} service{cs.length===1?'':'s'} · {cs.filter(c=>c.state==='running').length} running</Typography></Box><ArrowOutwardRounded color="action" /></Stack></Paper>)}
+            </Box></>}
+            {!!looseContainers.length && <><Typography variant="overline" color="text.secondary" fontWeight={700}>Standalone containers</Typography><Box className="container-grid" sx={{p:0,mt:1}}>{looseContainers.filter(c=>`${c.name} ${c.image}`.toLowerCase().includes(query.toLowerCase())).map(c=><ContainerCard key={c.id} container={c} />)}</Box></>}
+            {!containers.length&&<EmptyState icon={<DnsRounded />} title="Waiting for containers" detail="Start a project in the connected runtime and it will appear here." />}
+          </>}
+        </Box>}
+        {tab === 2 && <Box className="settings-grid">
+          <Paper className="settings-panel"><Stack direction="row" spacing={1.3} alignItems="center"><Avatar className="settings-icon"><HubRounded /></Avatar><Box><Typography fontWeight={650}>Connected runtime</Typography><Typography variant="body2" color="text.secondary">{status?.engine?.socket || 'Local socket not found'}</Typography></Box></Stack><Divider sx={{ my: 2 }} /><SettingLine label="Containers discovered" value={String(containers.length)} /><SettingLine label="Last sync" value={status?.lastSync ? new Date(status.lastSync).toLocaleTimeString('en-US') : 'Waiting'} /><SettingLine label="Compose files" value="Read only" /></Paper>
+          <Paper className="settings-panel"><Stack direction="row" spacing={1.3} alignItems="center"><Avatar className="settings-icon violet"><LockRounded /></Avatar><Box><Typography fontWeight={650}>Local TLS</Typography><Typography variant="body2" color="text.secondary">Certificates trusted by the operating system.</Typography></Box></Stack><Divider sx={{ my: 2 }} /><Alert severity="info" icon={<TerminalRounded />}>Run <code>dock trust</code> to trust the local certificate authority. HTTPS routes are issued automatically after setup.</Alert><Typography variant="caption" color="text.secondary" display="block" mt={1.5}>Certificates cover exact names and wildcards added in the dashboard or through dock.yml.</Typography></Paper>
+          <Paper className="settings-panel"><Stack direction="row" spacing={1.3} alignItems="center"><Avatar className="settings-icon teal"><CodeRounded /></Avatar><Box><Typography fontWeight={650}>Declarative routes</Typography><Typography variant="body2" color="text.secondary">Keep configuration in the project.</Typography></Box></Stack><Divider sx={{ my: 2 }} /><Box component="pre" className="code-sample">{`dock routes apply\ndock routes apply --file dock.yml --project api\ndock routes list`}</Box><Typography variant="caption" color="text.secondary">The CLI applies only routes owned by the YAML file.</Typography></Paper>
+          <Paper className="settings-panel"><Stack direction="row" spacing={1.3} alignItems="center"><Avatar className="settings-icon amber"><FolderOpenRounded /></Avatar><Box><Typography fontWeight={650}>Storage</Typography><Typography variant="body2" color="text.secondary">Persistent state in local JSON files.</Typography></Box></Stack><Divider sx={{ my: 2 }} /><Typography variant="body2" className="path-value">{status?.dataDir || '~/.local/share/dock'}</Typography><Typography variant="caption" color="text.secondary" display="block" mt={.75}>The CA private key is not mounted in the Traefik container.</Typography></Paper>
+        </Box>}
+      </Paper>
+
+      <Box className="footer-row"><Typography variant="caption" color="text.secondary">DOCK LOCAL GATEWAY <span className="footer-dot">·</span> Traefik Proxy</Typography><Typography variant="caption" color="text.secondary">Ports <b>80</b> · <b>443</b> <span className="footer-dot">·</span> loopback only</Typography></Box>
+    </Container>
+
+    <Dialog open={dialog} onClose={()=>!saving&&setDialog(false)} fullWidth maxWidth="sm">
+      <DialogTitle><Typography fontWeight={700} fontSize={19}>{editing ? 'Edit route' : 'Create a route'}</Typography><Typography variant="body2" color="text.secondary" mt={.5}>Route a local address to your service.</Typography></DialogTitle>
+      <DialogContent><Stack spacing={2} pt={1}>
+        <TextField label="Route ID" placeholder="web-https" size="small" value={form.id} disabled={!!editing} onChange={e=>setForm({...form,id:e.target.value})} helperText={editing ? 'The ID cannot be changed.' : 'Letters, numbers, dots, and hyphens.'} />
+        {form.protocol==='http'&&<TextField label="Hostname" placeholder="app.project.localhost" size="small" value={form.hostname} onChange={e=>setForm({...form,hostname:e.target.value})} helperText="Accepts exact names and wildcards such as *.project.localhost." />}
+        <FormControl size="small"><InputLabel>Discovered destination</InputLabel><Select label="Discovered destination" value={form.target} onChange={e=>{const v=e.target.value;const item=targets.find(t=>t.key===v);const p=item?.c.ports.find(x=>x.protocol===(form.protocol==='udp'?'udp':'tcp'))?.privatePort;setForm({...form,target:v,port:p?String(p):''})}}>{targets.map(t=><MenuItem key={t.key} value={t.key}>{t.label}</MenuItem>)}</Select></FormControl>
+        <Stack direction={{xs:'column',sm:'row'}} spacing={1.5}><FormControl size="small" fullWidth><InputLabel>Protocol</InputLabel><Select label="Protocol" value={form.protocol} onChange={e=>{const protocol=e.target.value;const nextPort=selectedPorts.find(p=>p.protocol===(protocol==='udp'?'udp':'tcp'))?.privatePort;setForm({...form,protocol,hostname:protocol==='http'?form.hostname:'',port:nextPort?String(nextPort):form.port,tls:protocol==='http'&&form.tls,redirectHttps:protocol==='http'&&form.redirectHttps})}}><MenuItem value="http">HTTP / HTTPS</MenuItem><MenuItem value="tcp">TCP</MenuItem><MenuItem value="udp">UDP</MenuItem></Select></FormControl>
+          {selectedPorts.length? <FormControl size="small" fullWidth><InputLabel>Container port</InputLabel><Select label="Container port" value={form.port} onChange={e=>setForm({...form,port:e.target.value})}>{selectedPorts.filter(p=>form.protocol==='udp'?p.protocol==='udp':p.protocol==='tcp').map(p=><MenuItem key={`${p.privatePort}/${p.protocol}`} value={String(p.privatePort)}>{p.privatePort}/{p.protocol}</MenuItem>)}</Select></FormControl>:<TextField size="small" fullWidth type="number" label="Container port" value={form.port} onChange={e=>setForm({...form,port:e.target.value})} />}</Stack>
+        {form.protocol==='http'&&<FormControlLabel control={<Switch checked={form.tls} onChange={e=>setForm({...form,tls:e.target.checked,listenPort:''})} />} label={<Stack direction="row" alignItems="center" spacing={.8}><LockRounded fontSize="small" /><Typography variant="body2">Enable HTTPS · HTTP redirects automatically</Typography></Stack>} />}
+        <TextField size="small" type="number" label="Host listener port" value={form.listenPort} onChange={e=>setForm({...form,listenPort:e.target.value})} helperText={form.protocol==='http'?`Default: ${form.tls?'443':'80'}. Choose another port to change the entry address.`:'Choose an available port. It will be bound to loopback only.'} />
+        <Alert severity="info" icon={<LockRounded />}>The local certificate authority private key stays on this host.</Alert>
+      </Stack></DialogContent>
+      <DialogActions sx={{px:3,pb:2.5}}><Button onClick={()=>{setDialog(false);setEditing(null)}} disabled={saving} color="inherit">Cancel</Button><Button variant="contained" onClick={()=>void saveRoute()} disabled={saving} startIcon={saving?<CircularProgress size={15} />:<AddRounded />}>{editing ? 'Save changes' : 'Save route'}</Button></DialogActions>
+    </Dialog>
+    <Snackbar open={!!toast} autoHideDuration={5000} onClose={()=>setToast(null)} anchorOrigin={{vertical:'bottom',horizontal:'right'}}><Alert severity={toast?.severity||'info'} onClose={()=>setToast(null)} variant="filled">{toast?.message}</Alert></Snackbar>
+  </Box>
+}
+
+function StatCard({icon,label,value,detail,tone,compact=false}:{icon:React.ReactNode;label:string;value:string;detail:string;tone:string;compact?:boolean}){
+  return <Paper className="stat-card"><Avatar className={`stat-icon ${tone}`}>{icon}</Avatar><Box sx={{minWidth:0}}><Typography variant="caption" color="text.secondary" fontWeight={550}>{label}</Typography><Typography className="stat-value" fontSize={compact?18:25} fontWeight={720}>{value}</Typography><Typography variant="caption" color="text.secondary" className="stat-detail">{detail}</Typography></Box></Paper>
+}
+
+function ContainerCard({container:c}:{container:ContainerInfo}){
+  return <Paper className="service-card"><Stack direction="row" alignItems="flex-start" spacing={1.5}><Avatar className="service-avatar"><DnsRounded /></Avatar><Box minWidth={0} flex={1}><Stack direction="row" alignItems="center" spacing={.7}><Typography fontWeight={650} noWrap>{c.service||c.name}</Typography>{dot(c.state==='running'?'#10b981':'#98a2b3')}</Stack><Typography variant="caption" color="text.secondary" noWrap display="block">{c.project?`${c.project} · `:''}{c.image}</Typography></Box><Tooltip title={c.hasTraefikRules?'Routes declared by Traefik labels':'Automatic Dock routes'}><Chip size="small" label={c.hasTraefikRules?'Labels':'Auto'} className={c.hasTraefikRules?'label-chip':'auto-chip'} /></Tooltip></Stack><Divider sx={{my:1.5}}/><Stack direction="row" justifyContent="space-between" alignItems="center"><Stack direction="row" spacing={.6} alignItems="center" color="text.secondary"><LanRounded sx={{fontSize:15}}/><Typography variant="caption">{c.ports.length?c.ports.map(p=>`${p.privatePort}/${p.protocol}`).join(', '):'No ports declared'}</Typography></Stack><Typography variant="caption" color="text.secondary">{c.networks.length} network{c.networks.length===1?'':'s'}</Typography></Stack>{c.discoveryError&&<Alert severity="warning" sx={{mt:1}}>{c.discoveryError}</Alert>}{c.portDiscoveryError&&<Alert severity="warning" sx={{mt:1}}>{c.portDiscoveryError}</Alert>}</Paper>
+}
+
+function EmptyState({icon,title,detail,action}:{icon:React.ReactNode;title:string;detail:string;action?:React.ReactNode}){
+  return <Stack alignItems="center" textAlign="center" spacing={1} py={7} className="empty-state"><Avatar>{icon}</Avatar><Typography fontWeight={650}>{title}</Typography><Typography variant="body2" color="text.secondary" maxWidth={360}>{detail}</Typography>{action}</Stack>
+}
+function SettingLine({label,value}:{label:string;value:string}){return <Stack direction="row" justifyContent="space-between" py={.65}><Typography variant="body2" color="text.secondary">{label}</Typography><Typography variant="body2" fontWeight={550}>{value}</Typography></Stack>}
+
+export default App

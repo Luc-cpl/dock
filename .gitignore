@@ -1,0 +1,6 @@
+internal/dock/web/dist/
+/web/node_modules/
+/web/dist/
+/.build/
+/dock
+*.log
