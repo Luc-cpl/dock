@@ -242,17 +242,24 @@ func ReadManifest(path string) (Manifest, string, error) {
 }
 
 func Serve(ctx context.Context, m *Manager) error {
-	if err := m.Start(ctx); err != nil {
-		return err
-	}
+	ctx, cancel := context.WithCancel(ctx)
 	defer func() {
+		cancel()
 		stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		_ = m.Stop(stopCtx)
 	}()
+	if err := m.Start(ctx); err != nil {
+		return err
+	}
 	server := &http.Server{Addr: ":9080", Handler: (&API{Manager: m}).Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return err
+	}
+	fmt.Println("Dock is serving the dashboard at https://localhost")
 	errch := make(chan error, 1)
-	go func() { errch <- server.ListenAndServe() }()
+	go func() { errch <- server.Serve(listener) }()
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

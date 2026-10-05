@@ -325,11 +325,13 @@ func (m *Manager) Status() map[string]any {
 }
 
 func (m *Manager) Start(ctx context.Context) error {
-	// Keep the dashboard available while the runtime or a required host port is unavailable.
-	if m.engine != nil {
-		_ = m.Sync(ctx)
-		go m.watch(ctx)
+	if m.engine == nil {
+		return errors.New(m.engineErr)
 	}
+	if err := m.Sync(ctx); err != nil {
+		return fmt.Errorf("start Traefik: %w", err)
+	}
+	go m.watch(ctx)
 	go m.periodic(ctx)
 	return nil
 }
@@ -603,6 +605,8 @@ func (m *Manager) buildDynamicLocked() (map[string]any, []Port, []string, error)
 	if _, err := os.Stat(panelCert); err == nil {
 		services["dock-panel"] = map[string]any{"loadBalancer": map[string]any{"servers": []map[string]string{{"url": "http://host.docker.internal:9080"}}}}
 		routers["dock-panel"] = map[string]any{"entryPoints": []string{"websecure"}, "rule": "Host(`localhost`)", "service": "dock-panel", "priority": 100000, "tls": map[string]any{}, "middlewares": []string{"dock-panel-auth"}}
+		middlewares["dock-panel-redirect"] = map[string]any{"redirectScheme": map[string]any{"scheme": "https", "port": "443", "permanent": true}}
+		routers["dock-panel-redirect"] = map[string]any{"entryPoints": []string{"web"}, "rule": "Host(`localhost`)", "service": "noop@internal", "priority": 100000, "middlewares": []string{"dock-panel-redirect"}}
 		tlsCerts = append(tlsCerts, map[string]string{"certFile": "/etc/traefik/certs/" + certID("localhost") + ".pem", "keyFile": "/etc/traefik/certs/" + certID("localhost") + "-key.pem"})
 	}
 	for _, route := range routes {

@@ -43,6 +43,9 @@ func TestApplicationPort9000DoesNotUseDashboardListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := strings.Join(created.Cmd, " ")
+	if created.HostConfig.Sysctls["net.ipv4.ip_unprivileged_port_start"] != "80" {
+		t.Fatal("Traefik cannot bind ports 80 and 443 inside its rootless network namespace")
+	}
 	if !strings.Contains(cmd, "--entryPoints.app9000.address=:9000") || !strings.Contains(cmd, "--entryPoints.traefik.address=:9180") {
 		t.Fatalf("application and dashboard listeners overlap: %s", cmd)
 	}

@@ -52,7 +52,6 @@ func run(args []string) error {
 	case "serve":
 		signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		fmt.Println("Dock is serving the dashboard at https://localhost")
 		if err := dock.Serve(signalCtx, m); err != nil {
 			return err
 		}

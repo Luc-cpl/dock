@@ -278,6 +278,7 @@ type hostConfig struct {
 	PortBindings  map[string][]PortBinding `json:"PortBindings"`
 	RestartPolicy map[string]any           `json:"RestartPolicy"`
 	SecurityOpt   []string                 `json:"SecurityOpt,omitempty"`
+	Sysctls       map[string]string        `json:"Sysctls,omitempty"`
 }
 type createContainerResponse struct {
 	ID string `json:"Id"`
@@ -292,7 +293,8 @@ func (e *Engine) ensureTraefik(ctx context.Context, dataDir string, ports []Port
 		Networks   []string
 		Socket     string
 		PanelProxy string
-	}{ports, networks, e.Socket, "host-gateway-dashboard9180"})
+		Sysctls    map[string]string
+	}{ports, networks, e.Socket, "host-gateway-dashboard9180", map[string]string{"net.ipv4.ip_unprivileged_port_start": "80"}})
 	signature := string(signatureBytes)
 	signaturePath := filepath.Join(dataDir, "traefik-signature.json")
 	previousSignature, _ := os.ReadFile(signaturePath)
@@ -367,7 +369,7 @@ func (e *Engine) ensureTraefik(ctx context.Context, dataDir string, ports []Port
 	labels := map[string]string{"traefik.enable": "false", "org.opencontainers.image.title": "Dock managed Traefik"}
 	body := map[string]any{
 		"Image": "traefik:v3.7.13", "Cmd": cmd, "Labels": labels, "ExposedPorts": exposed,
-		"HostConfig": hostConfig{Binds: []string{e.Socket + ":/var/run/docker.sock:ro,Z", filepath.Join(dataDir, "dynamic") + ":/etc/traefik/dynamic:ro,Z", filepath.Join(dataDir, "certs") + ":/etc/traefik/certs:ro,Z"}, ExtraHosts: []string{"host.docker.internal:host-gateway"}, PortBindings: bindings, RestartPolicy: map[string]any{"Name": "unless-stopped"}, SecurityOpt: []string{"label=disable"}},
+		"HostConfig": hostConfig{Binds: []string{e.Socket + ":/var/run/docker.sock:ro,Z", filepath.Join(dataDir, "dynamic") + ":/etc/traefik/dynamic:ro,Z", filepath.Join(dataDir, "certs") + ":/etc/traefik/certs:ro,Z"}, ExtraHosts: []string{"host.docker.internal:host-gateway"}, PortBindings: bindings, RestartPolicy: map[string]any{"Name": "unless-stopped"}, SecurityOpt: []string{"label=disable"}, Sysctls: map[string]string{"net.ipv4.ip_unprivileged_port_start": "80"}},
 	}
 	var created createContainerResponse
 	resp, err := e.request(ctx, http.MethodPost, "/containers/create?name="+name, body)

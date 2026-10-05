@@ -17,6 +17,17 @@ Use `make build` when you only need a workspace binary at `./dock`; use `make li
 
 ## Run Dock as a user service
 
+Rootless Podman needs permission to publish Dock's ports 80 and 443. Check `sysctl net.ipv4.ip_unprivileged_port_start`; if it is greater than 80, configure the host once:
+
+```sh
+echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/90-dock-rootless.conf
+sudo sysctl -p /etc/sysctl.d/90-dock-rootless.conf
+```
+
+This allows unprivileged processes to bind ports 80 and above and persists across reboots. If Traefik cannot start, `dock serve` reports the startup error and exits, removing its managed container.
+
+Dock also sets this limit inside the Traefik container's network namespace whenever it creates the container. The host setting and the container setting are both required for rootless port binding.
+
 Dock can run as a systemd user service. Install the unit without enabling it, then enable it when you want Dock to start at login:
 
 ```sh
