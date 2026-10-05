@@ -68,7 +68,8 @@ func (m Manifest) expandRoutes(project string) ([]Route, error) {
 			}
 			hostname := strings.ToLower(strings.TrimSpace(spec.Hostname))
 			if hostname == "" && (protocol == "http" || protocol == "https") {
-				hostname = dnsLabel(project)
+				// An empty hostname means the root of the Compose application.
+				hostname = dnsLabel(project) + ".localhost"
 			}
 			identity := fmt.Sprintf("%s/%s/%s/%d/%d", service, hostname, protocol, hostPort, containerPort)
 			routes = append(routes, Route{

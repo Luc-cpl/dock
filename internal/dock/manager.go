@@ -439,6 +439,9 @@ func (m *Manager) Sync(ctx context.Context) error {
 				}
 				if reachable {
 					route.Status = "active"
+					if route.Owner != "auto" && !routePortAdvertised(route, usable) {
+						message = fmt.Sprintf("Destination port %d is configured explicitly but is not advertised by the container; Dock cannot verify that a process is listening there", route.Port)
+					}
 				} else {
 					route.Status = "pending"
 				}
@@ -517,6 +520,12 @@ func (m *Manager) resolve(route Route, containers []Container) ([]Container, []C
 	if len(targets) == 0 {
 		return nil, nil, false
 	}
+	// A configured route declares its destination port explicitly. Container
+	// exposed-port metadata is optional in Compose, so only require that
+	// metadata for routes created by automatic discovery.
+	if route.Owner != "auto" {
+		return targets, targets, true
+	}
 	var usable []Container
 	for _, c := range targets {
 		for _, p := range c.Ports {
@@ -530,6 +539,17 @@ func (m *Manager) resolve(route Route, containers []Container) ([]Container, []C
 		return targets, nil, true
 	}
 	return targets, usable, true
+}
+
+func routePortAdvertised(route Route, containers []Container) bool {
+	for _, container := range containers {
+		for _, port := range container.Ports {
+			if port.PrivatePort == route.Port && (route.Protocol == "http" && port.Protocol == "tcp" || port.Protocol == route.Protocol) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m *Manager) buildDynamicLocked() (map[string]any, []Port, []string, error) {
@@ -1022,7 +1042,10 @@ func (m *Manager) ApplyManifest(path, projectOverride string, manifest Manifest)
 		if route.Project == "" && (route.Service != "" || isRelativeManifestHostname(route.Hostname)) {
 			return fmt.Errorf("route %q needs a Compose project to resolve its relative hostname; use --project", route.ID)
 		}
-		route.Hostname = expandManifestHostname(route.Hostname, route.Project)
+		protocol := strings.ToLower(strings.TrimSpace(route.Protocol))
+		if protocol == "" || protocol == "http" || protocol == "https" {
+			route.Hostname = expandManifestHostname(route.Hostname, route.Project)
+		}
 		if err := route.Normalize(owner); err != nil {
 			return err
 		}
