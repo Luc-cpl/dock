@@ -114,7 +114,12 @@ func (m *Manager) effectiveRoutesLocked() []Route {
 	}
 	out := make([]Route, 0, len(byKey))
 	for _, r := range byKey {
-		if !r.Enabled || r.Disabled {
+		// Manifest-disabled routes are hidden. Dashboard-disabled routes remain
+		// visible so the user can enable them again.
+		if r.Disabled {
+			continue
+		}
+		if !r.Enabled {
 			r.Status, r.Message = "disabled", "Disabled"
 		}
 		out = append(out, r)
@@ -1063,10 +1068,17 @@ func isRelativeManifestHostname(hostname string) bool {
 }
 
 // expandManifestHostname lets a service route use a hostname relative to its
-// Compose project: "app", "*", and "*.app" become local project names.
+// Compose project: "app", "*", and "*.app" become local project names;
+// an empty hostname resolves to the project's root hostname.
 func expandManifestHostname(hostname, project string) string {
 	hostname = strings.ToLower(strings.TrimSpace(hostname))
-	if hostname == "" || strings.HasSuffix(hostname, ".localhost") || strings.TrimSpace(project) == "" {
+	if hostname == "" {
+		if strings.TrimSpace(project) != "" {
+			return dnsLabel(project) + ".localhost"
+		}
+		return hostname
+	}
+	if strings.HasSuffix(hostname, ".localhost") || strings.TrimSpace(project) == "" {
 		return hostname
 	}
 	project = dnsLabel(project)

@@ -68,7 +68,7 @@ func (m Manifest) expandRoutes(project string) ([]Route, error) {
 			}
 			hostname := strings.ToLower(strings.TrimSpace(spec.Hostname))
 			if hostname == "" && (protocol == "http" || protocol == "https") {
-				hostname = dnsLabel(service)
+				hostname = dnsLabel(project)
 			}
 			identity := fmt.Sprintf("%s/%s/%s/%d/%d", service, hostname, protocol, hostPort, containerPort)
 			routes = append(routes, Route{
@@ -159,6 +159,6 @@ func EncodeManifest(manifest Manifest) ([]byte, error) {
 	header := "# Protocols: http, https, tcp, udp. HTTPS always redirects HTTP.\n" +
 		"# port: container port (HTTP defaults to 80, HTTPS to 443), or \"host:container\".\n" +
 		"# hostname is relative to the Compose project; .localhost names are absolute.\n" +
-		"# disabled: true disables the route while keeping it visible in the dashboard.\n"
+		"# disabled: true disables the route and hides it from the dashboard.\n"
 	return append([]byte(header), data...), nil
 }
