@@ -1189,28 +1189,6 @@ func containsRouteSettings(routes []Route, other Route) bool {
 	return false
 }
 
-func Trust() error {
-	if _, err := exec.LookPath("mkcert"); err != nil {
-		return errors.New("mkcert is not installed; install mkcert and try again")
-	}
-	cmd := exec.Command("mkcert", "-install")
-	output, err := cmd.CombinedOutput()
-	nssUnavailable := strings.Contains(string(output), "no Firefox and/or Chrome/Chromium security databases found")
-	if len(output) > 0 {
-		for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-			if strings.Contains(line, "no Firefox and/or Chrome/Chromium security databases found") {
-				fmt.Fprintln(os.Stderr, "Note: no Firefox or Chromium certificate database was found; system trust setup can still succeed.")
-				continue
-			}
-			fmt.Fprintln(os.Stdout, line)
-		}
-	}
-	if err != nil && !nssUnavailable {
-		return fmt.Errorf("mkcert -install: %w", err)
-	}
-	return generateLocalCertificate(DataDir(), "localhost", "127.0.0.1", "::1")
-}
-
 func generateLocalCertificate(dataDir string, hosts ...string) error {
 	if _, err := exec.LookPath("mkcert"); err != nil {
 		return errors.New("mkcert is not installed; install it and run dock trust")

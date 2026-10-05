@@ -47,7 +47,7 @@ Install `mkcert`, then run:
 dock trust
 ```
 
-This installs mkcert's local CA in the current user's system trust store and creates the dashboard certificate for `localhost`. If no Firefox or Chromium certificate database exists, mkcert may report that browser stores were skipped; Dock treats this as informational and continues with system trust. Dock issues the exact or wildcard certificates required by HTTPS routes and never mounts the CA private key into Traefik. HTTPS uses port 443 by default and forwards to the selected HTTP port inside the container. Every HTTPS route automatically redirects HTTP requests on port 80 to its configured HTTPS listener, including custom ports.
+This installs mkcert's local CA in the current user's system trust store and creates the dashboard certificate for `localhost`. Dock also imports and verifies the same CA in existing Firefox profiles (including `~/.config/mozilla/firefox`, custom profiles from `profiles.ini`, Snap and Flatpak) and Chromium NSS stores (including `~/.local/share/pki/nssdb` and Chrome/Edge Flatpak stores). On Debian/Ubuntu, browser trust requires `certutil` from `libnss3-tools`. If no browser database exists, start the browser once and run `dock trust` again. Fully restart browsers after installation, including apps with an embedded browser. Browser import failures are reported as errors; system trust alone does not confirm browser trust. Dock issues the exact or wildcard certificates required by HTTPS routes and never mounts the CA private key into Traefik. HTTPS uses port 443 by default and forwards to the selected HTTP port inside the container. Every HTTPS route automatically redirects HTTP requests on port 80 to its configured HTTPS listener, including custom ports.
 
 ## Routes
 
